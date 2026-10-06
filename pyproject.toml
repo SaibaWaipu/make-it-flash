@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "make-it-flash"
+version = "0.1.0"
+description = "Streaming calibration, teacher activation caching, and local GDN alignment for LLM-jp Qwen3-MoE"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "torch>=2.5",
+  "transformers>=4.57.0,<6.0",
+  "datasets>=3.0",
+  "huggingface_hub>=0.34",
+  "accelerate>=1.0",
+  "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+make-it-flash = "make_it_flash.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
