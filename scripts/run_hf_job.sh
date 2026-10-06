@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${MIF_GIT_URL:?Set MIF_GIT_URL to the Git remote for this project}"
+MIF_GIT_URL="${MIF_GIT_URL:-https://github.com/SaibaWaipu/make-it-flash.git}"
 : "${MIF_OUTPUT_REPO:?Set MIF_OUTPUT_REPO to the private Hub model repo for the fitted layer}"
 
 HF_FLAVOR="${HF_FLAVOR:-a100-large}"

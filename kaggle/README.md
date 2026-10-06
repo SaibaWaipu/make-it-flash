@@ -1,13 +1,15 @@
-# Kaggle
+# Kaggle 実行
 
-This directory contains a self-contained notebook generated from the tracked package sources.
+この notebook はパッケージソースを埋め込んだ self-contained 版です。作業ディレクトリを project root にして実行してください。
 
-1. Regenerate after source edits: python scripts/build_kaggle_notebook.py (from the project directory).
-2. From the project directory, push the private kernel with: kaggle kernels push -p kaggle.
-3. The notebook requests GPU + Internet, prepares the calibration sample, then starts teacher caching only if at least 66 GiB is free.
+## 実行手順
 
-Kaggle GPU types vary. If preflight rejects the available GPU, no 32B teacher weights have been loaded; use a compatible HF Jobs flavor after checking its current price, or defer the teacher pass.
+1. ソースを変更したら python scripts/build_kaggle_notebook.py で notebook を再生成します。
+2. kaggle/kernel-metadata.json の id を自分の Kaggle username / slug に合わせます。別のユーザーが実行する場合は is_private も必要に応じて変更します。
+3. GPU と Internet を有効にして kaggle kernels push -p kaggle を実行します。
 
-## Current validation result
+Notebook はまず calibration data を準備します。空き VRAM が66 GiB以上の場合のみ teacher cache と GDN fitting を続け、未満なら teacher weights をダウンロードせず止まります。T4 × 2 の合計約29–32 GBは BF16 teacher pass の要件を満たしません。Hugging Face Hub へのネットワーク接続も必要です。
 
-Private kernel version 2 reached the notebook but could not resolve the Hugging Face Hub host (Temporary failure in name resolution) even though Internet was enabled; its image also reported CPU-only PyTorch. It failed before downloading calibration data or model weights. This is a Kaggle runtime/network limitation observed in this run; retry only after confirming Kaggle Internet access is available.
+## 検証メモ
+
+2026-10-06 の private kernel 実行では、Kaggle runtime が CPU-only PyTorch を報告し、Hugging Face Hub の DNS 解決にも失敗しました。calibration data / model weights のダウンロード前に停止しており、これはその実行環境での制約です。再実行前に GPU 割当と huggingface.co への接続を確認してください。代替手段は project root の README にある HF Jobs 手順です。

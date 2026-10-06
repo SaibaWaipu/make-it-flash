@@ -10,3 +10,11 @@ hf-cache/
 *.safetensors
 *.pt
 *.bin
+.DS_Store
+build/
+dist/
+.ruff_cache/
+.mypy_cache/
+.coverage
+wandb/
+*.log
