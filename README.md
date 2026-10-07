@@ -87,11 +87,20 @@ prepare の出力 mix が目標に達しない場合は data_manifest.json の a
 HF CLI にログインし、private model repo の作成・書き込み権限がある token を使って実行します。スクリプトの `--secrets HF_TOKEN` がログイン中の token をジョブに渡します。
 
     hf auth login
-    MIF_GIT_REF=gdn-4.1-pilot MIF_OUTPUT_REPO=SaibaWaipu/make-it-flash-pilot bash scripts/run_hf_job.sh
+    # Default is a cost-estimated dry run; no job is submitted.
+    MIF_GIT_REF=gdn-4.1-pilot bash scripts/run_hf_job.sh
 
-既定は `a100-large`、timeout は4時間です。現在の目安は A100 80 GB が約 $2.50/時、4時間で最大約 $10 ですが、料金は変動するため起動直前に確認してください。ジョブは GDN checkpoint と fit metrics のみを private repo に upload します。calibration data と activation cache は upload しません。**この README を読むだけではジョブは起動せず、課金も発生しません。**
+    # Launch only after explicit approval; pin the exact source commit and budget.
+    MIF_LAUNCH_HF_JOB=1 \
+      MIF_APPROVED_BUDGET_USD=9.00 \
+      MIF_GIT_REF=gdn-4.1-pilot \
+      MIF_GIT_COMMIT="$(git rev-parse HEAD)" \
+      MIF_OUTPUT_REPO=YOUR_HF_USERNAME/llm-jp-41-gdn-pilot \
+      bash scripts/run_hf_job.sh
 
-このスクリプトは既定で公開 Git remote の `main` を clone します。別の変更を使う場合は、その変更をpushした後、必要に応じて `MIF_GIT_URL` と `MIF_GIT_REF`（branch または tag）を指定してください。ジョブ内でソースコードが実行され、token も渡されるため、信頼できる remote/ref を指定してください。
+既定は `a100-large`、timeout 3時間、10K tokens・seq len 1024・1 epoch・最大20 stepsです。runnerは毎回`hf jobs hardware --json`でrateを取得し、timeoutまで動いた場合の最大compute costを計算して、承認budgetを超えるとlaunchを拒否します。現時点のHF CLI表示はA100 80GBが $2.50/時で、3時間上限は約 $7.50（今回承認された上限は合計 $9）です。価格変更時はlive rateで再計算します。ジョブはGDN checkpointとfit metricsのみをprivate repoへuploadし、calibration dataとactivation cacheはuploadしません。**dry-runが既定で、README例をそのまま実行してもジョブは起動しません。**
+
+ジョブは公開Git remoteの`gdn-4.1-pilot`をcloneし、必須の`MIF_GIT_COMMIT`と一致することを確認してから学習します。ジョブ内でsource codeが実行されHF tokenも渡されるため、信頼できるremote/ref/commitを指定してください。
 
 ## Kaggle（任意・旧手順）
 
