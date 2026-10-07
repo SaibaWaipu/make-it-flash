@@ -299,10 +299,11 @@ class QSAIndexer(nn.Module):
     ) -> torch.Tensor:
         """Train block scores toward teacher attention mass (top-k itself has no gradient).
 
-        ``teacher_attention`` is a dense teacher probability tensor shaped
-        ``(batch, heads, query, key)`` or ``(batch, query, key)``. This auxiliary
-        loss uses a smooth softplus score surrogate; inference keeps the exact
-        ReLU/top-k reference selector.
+        ``teacher_attention`` may be a dense probability tensor shaped
+        ``(batch, heads, query, key)`` or pre-aggregated block masses shaped
+        ``(batch, query, num_blocks)``. The latter keeps long-context cache files
+        compact. A smooth softplus surrogate is used for training; inference keeps
+        the exact ReLU/top-k reference selector.
         """
         if hidden_states.ndim != 3:
             raise ValueError("hidden_states must have shape (batch, query, hidden)")
@@ -319,13 +320,23 @@ class QSAIndexer(nn.Module):
         else:
             raise ValueError("attention_mask must be boolean or additive floating point")
         teacher = teacher_attention.detach().to(device=hidden_states.device, dtype=torch.float32)
-        if teacher.ndim == 3:
-            teacher = teacher.unsqueeze(1)
-        if teacher.ndim != 4 or teacher.shape[0] != batch_size or teacher.shape[-2:] != (query_length, query_length):
-            raise ValueError("teacher_attention must have shape (batch, heads, query, key)")
+        compact_block_mass = teacher.ndim == 3
+        if compact_block_mass:
+            expected_causal = torch.ones(
+                (batch_size, query_length, query_length), dtype=torch.bool, device=visible.device
+            ).tril()
+            if not torch.equal(visible, expected_causal):
+                raise ValueError("compact teacher block masses require an unpadded causal attention mask")
+            if teacher.shape[:2] != (batch_size, query_length):
+                raise ValueError("compact teacher block masses must have shape (batch, query, num_blocks)")
+            if teacher.shape[-1] < query_length // self.compress_ratio:
+                raise ValueError("compact teacher block masses do not cover all full micro-blocks")
+        elif teacher.ndim == 4 and teacher.shape[0] == batch_size and teacher.shape[-2:] == (query_length, query_length):
+            teacher = teacher.mean(dim=1)
+        else:
+            raise ValueError("teacher_attention must be dense (batch, heads, query, key) or compact (batch, query, blocks)")
         if not torch.isfinite(teacher).all() or torch.any(teacher < 0):
-            raise ValueError("teacher_attention must contain finite nonnegative probabilities")
-        teacher = teacher.mean(dim=1)
+            raise ValueError("teacher attention masses must be finite and nonnegative")
         positions = _normalize_position_ids(position_ids, batch_size, query_length, hidden_states.device)
         query, raw_keys = self._project_queries_keys(hidden_states, positions)
         losses = []
@@ -342,9 +353,12 @@ class QSAIndexer(nn.Module):
                     local_visible_indices,
                     smooth=True,
                 )
-                teacher_mass = teacher[batch_idx, query_idx].index_select(
-                    0, block_token_indices.flatten()
-                ).view(num_complete_blocks, self.compress_ratio).sum(dim=-1)
+                if compact_block_mass:
+                    teacher_mass = teacher[batch_idx, query_idx, :num_complete_blocks]
+                else:
+                    teacher_mass = teacher[batch_idx, query_idx].index_select(
+                        0, block_token_indices.flatten()
+                    ).view(num_complete_blocks, self.compress_ratio).sum(dim=-1)
                 total_mass = teacher_mass.sum()
                 if total_mass > 0:
                     target_distribution = teacher_mass / total_mass

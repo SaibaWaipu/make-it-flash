@@ -7,6 +7,8 @@ MIF_GIT_REF="${MIF_GIT_REF:-gdn-4.1-pilot}"
 MIF_GIT_COMMIT="${MIF_GIT_COMMIT:-}"
 MIF_OUTPUT_REPO="${MIF_OUTPUT_REPO:-}"
 MIF_APPROVED_BUDGET_USD="${MIF_APPROVED_BUDGET_USD:-}"
+MIF_CONFIRMED_CUMULATIVE_SPENT_USD="${MIF_CONFIRMED_CUMULATIVE_SPENT_USD:-}"
+ENGINEERING_CUMULATIVE_CAP_USD="9.00"
 
 HF_FLAVOR="${HF_FLAVOR:-a100-large}"
 HF_TIMEOUT="${HF_TIMEOUT:-3h}"
@@ -54,25 +56,34 @@ PY
 IFS=$'\t' read -r HF_RATE_USD_PER_HOUR HF_ESTIMATED_COST_USD <<<"$COST_INFO"
 printf 'HF Job plan: flavor=%s timeout=%s rate=$%s/hour estimated_max_cost=$%s tokens=%s max_seq_len=%s layer=%s max_steps=%s\n' \
   "$HF_FLAVOR" "$HF_TIMEOUT" "$HF_RATE_USD_PER_HOUR" "$HF_ESTIMATED_COST_USD" "$MIF_TOKENS" "$MIF_MAX_SEQ_LEN" "$MIF_LAYER" "$MIF_MAX_STEPS"
+printf 'Cumulative engineering compute cap: $%s (pilot included)\n' "$ENGINEERING_CUMULATIVE_CAP_USD"
 
 if [[ "$MIF_LAUNCH_HF_JOB" == "0" ]]; then
-  echo "DRY RUN ONLY: no HF Job was submitted. Set MIF_LAUNCH_HF_JOB=1 and an approved budget to launch."
+  echo "DRY RUN ONLY: no HF Job was submitted. Launch requires explicit approval, per-job budget, and invoice-confirmed cumulative prior spend."
   exit 0
 fi
 
 : "${MIF_APPROVED_BUDGET_USD:?Set MIF_APPROVED_BUDGET_USD to the approved per-job spending limit}"
+: "${MIF_CONFIRMED_CUMULATIVE_SPENT_USD:?Set the invoice-confirmed prior spend, including the original pilot}"
 : "${MIF_OUTPUT_REPO:?Set MIF_OUTPUT_REPO to a private Hub model repo for the fitted layer}"
 : "${MIF_GIT_COMMIT:?Set MIF_GIT_COMMIT to the exact approved source commit}"
-if ! python - "$MIF_APPROVED_BUDGET_USD" "$HF_ESTIMATED_COST_USD" <<'PY'
+if ! python - "$MIF_APPROVED_BUDGET_USD" "$HF_ESTIMATED_COST_USD" "$MIF_CONFIRMED_CUMULATIVE_SPENT_USD" "$ENGINEERING_CUMULATIVE_CAP_USD" <<'PY'
 from decimal import Decimal, InvalidOperation
 import sys
 
 try:
-    budget, estimate = map(Decimal, sys.argv[1:])
+    budget, estimate, prior_spend, cap = map(Decimal, sys.argv[1:])
 except InvalidOperation:
-    raise SystemExit("budget and estimate must be valid dollar amounts")
-if budget <= 0 or estimate > budget:
-    raise SystemExit(f"refusing launch: estimated ${estimate} exceeds approved budget ${budget}")
+    raise SystemExit("budget, estimate, prior spend, and cap must be valid dollar amounts")
+if not all(value.is_finite() for value in (budget, estimate, prior_spend, cap)):
+    raise SystemExit("cost guard values must be finite dollar amounts")
+if budget <= 0 or prior_spend < 0 or prior_spend > cap:
+    raise SystemExit(f"refusing launch: invalid budget or confirmed prior spend ${prior_spend} against cap ${cap}")
+remaining = cap - prior_spend
+if budget > remaining:
+    raise SystemExit(f"refusing launch: per-job budget ${budget} exceeds remaining cumulative cap ${remaining}")
+if estimate > budget:
+    raise SystemExit(f"refusing launch: estimated ${estimate} exceeds approved per-job budget ${budget}")
 PY
 then
   echo "Cost guard refused HF Job launch." >&2

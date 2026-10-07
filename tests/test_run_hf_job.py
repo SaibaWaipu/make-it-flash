@@ -56,7 +56,8 @@ def test_hf_job_runner_refuses_over_budget_before_submission(tmp_path):
     result = _run_runner(
         tmp_path,
         MIF_LAUNCH_HF_JOB="1",
-        MIF_APPROVED_BUDGET_USD="9.00",
+        MIF_APPROVED_BUDGET_USD="8.73",
+        MIF_CONFIRMED_CUMULATIVE_SPENT_USD="0.27",
         MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
         MIF_GIT_COMMIT="deadbeef",
         HF_TIMEOUT="4h",
@@ -72,7 +73,8 @@ def test_hf_job_runner_launches_only_with_budget_and_required_pins(tmp_path):
     result = _run_runner(
         tmp_path,
         MIF_LAUNCH_HF_JOB="1",
-        MIF_APPROVED_BUDGET_USD="9.00",
+        MIF_APPROVED_BUDGET_USD="8.73",
+        MIF_CONFIRMED_CUMULATIVE_SPENT_USD="0.27",
         MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
         MIF_GIT_COMMIT="deadbeef",
     )
@@ -84,3 +86,32 @@ def test_hf_job_runner_launches_only_with_budget_and_required_pins(tmp_path):
     assert "--detach" in result.stdout
     assert "bash -c" in result.stdout
     assert "apt-get update" in result.stdout
+
+
+def test_hf_job_runner_requires_invoice_confirmed_prior_spend(tmp_path):
+    result = _run_runner(
+        tmp_path,
+        MIF_LAUNCH_HF_JOB="1",
+        MIF_APPROVED_BUDGET_USD="8.73",
+        MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
+        MIF_GIT_COMMIT="deadbeef",
+    )
+
+    assert result.returncode != 0
+    assert "invoice-confirmed prior spend" in result.stderr
+    assert "MOCK_HF_JOBS_RUN" not in result.stdout
+
+
+def test_hf_job_runner_enforces_remaining_cumulative_cap(tmp_path):
+    result = _run_runner(
+        tmp_path,
+        MIF_LAUNCH_HF_JOB="1",
+        MIF_APPROVED_BUDGET_USD="7.50",
+        MIF_CONFIRMED_CUMULATIVE_SPENT_USD="2.00",
+        MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
+        MIF_GIT_COMMIT="deadbeef",
+    )
+
+    assert result.returncode == 3
+    assert "remaining cumulative cap $7.00" in result.stderr
+    assert "MOCK_HF_JOBS_RUN" not in result.stdout

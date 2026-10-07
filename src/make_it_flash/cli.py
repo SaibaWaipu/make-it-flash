@@ -31,10 +31,15 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--seed", type=int, default=17)
     prepare.add_argument("--overwrite", action="store_true")
 
-    cache = commands.add_parser("cache", help="capture teacher attention input/output activations")
+    cache = commands.add_parser("cache", help="capture teacher attention activations and optional QSA block masses")
     cache.add_argument("--data-file", type=Path, default=Path("artifacts/data/calibration.jsonl"))
     cache.add_argument("--output-dir", type=Path, default=Path("artifacts/cache"))
     cache.add_argument("--layers", default="0", help="comma-separated decoder layer indices")
+    cache.add_argument(
+        "--attention-layers",
+        default="",
+        help="subset of --layers whose dense teacher attention should be reduced to QSA block masses (e.g. 3)",
+    )
     cache.add_argument("--max-examples", type=int)
     cache.add_argument("--min-free-gib", type=float, default=66.0)
     cache.add_argument("--overwrite", action="store_true")
@@ -50,6 +55,19 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--seed", type=int, default=17)
     fit.add_argument("--allow-cpu", action="store_true", help="allow slow CPU fitting for tiny smoke tests only")
     fit.add_argument("--overwrite", action="store_true")
+
+    fit_qsa = commands.add_parser("fit-qsa", help="fit one QSA block from cached teacher block masses")
+    fit_qsa.add_argument("--cache-dir", type=Path, default=Path("artifacts/cache"))
+    fit_qsa.add_argument("--output-dir", type=Path, default=Path("artifacts/qsa"))
+    fit_qsa.add_argument("--layer", type=int, required=True)
+    fit_qsa.add_argument("--epochs", type=int, default=3)
+    fit_qsa.add_argument("--max-steps", type=int, default=200)
+    fit_qsa.add_argument("--learning-rate", type=float, default=1e-4)
+    fit_qsa.add_argument("--selector-loss-weight", type=float, default=0.1)
+    fit_qsa.add_argument("--validation-fraction", type=float, default=0.1)
+    fit_qsa.add_argument("--seed", type=int, default=17)
+    fit_qsa.add_argument("--allow-cpu", action="store_true", help="allow slow CPU fitting for tiny smoke tests only")
+    fit_qsa.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -75,17 +93,19 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             layers = [int(value.strip()) for value in args.layers.split(",") if value.strip()]
+            attention_layers = [int(value.strip()) for value in args.attention_layers.split(",") if value.strip()]
         except ValueError as exc:
-            raise SystemExit("--layers must be comma-separated integers, e.g. 0,3,7") from exc
+            raise SystemExit("--layers and --attention-layers must be comma-separated integers, e.g. 0,3,7") from exc
         result = cache_teacher_outputs(
             data_file=args.data_file,
             output_dir=args.output_dir,
             layers=layers,
+            attention_layers=attention_layers,
             max_examples=args.max_examples,
             min_free_gib=args.min_free_gib,
             overwrite=args.overwrite,
         )
-    else:
+    elif args.command == "fit":
         from .fit import fit_one_layer
 
         result = fit_one_layer(
@@ -95,6 +115,22 @@ def main(argv: list[str] | None = None) -> int:
             epochs=args.epochs,
             max_steps=args.max_steps,
             learning_rate=args.learning_rate,
+            validation_fraction=args.validation_fraction,
+            seed=args.seed,
+            allow_cpu=args.allow_cpu,
+            overwrite=args.overwrite,
+        )
+    else:
+        from .fit_qsa import fit_qsa_layer
+
+        result = fit_qsa_layer(
+            cache_dir=args.cache_dir,
+            output_dir=args.output_dir,
+            layer=args.layer,
+            epochs=args.epochs,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            selector_loss_weight=args.selector_loss_weight,
             validation_fraction=args.validation_fraction,
             seed=args.seed,
             allow_cpu=args.allow_cpu,

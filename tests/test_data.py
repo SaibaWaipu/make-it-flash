@@ -86,3 +86,15 @@ def test_invalid_mix_is_rejected():
 
     with pytest.raises(ValueError, match="sum to 1.0"):
         allocate_quotas(10, [MixSource("x", 0.5, ("a",))])
+
+
+def test_cli_exposes_qsa_teacher_cache_and_fitting():
+    cache_args = build_parser().parse_args(
+        ["cache", "--layers", "3", "--attention-layers", "3"]
+    )
+    fit_args = build_parser().parse_args(["fit-qsa", "--layer", "3"])
+
+    assert cache_args.attention_layers == "3"
+    assert fit_args.command == "fit-qsa"
+    assert fit_args.layer == 3
+    assert fit_args.selector_loss_weight == 0.1

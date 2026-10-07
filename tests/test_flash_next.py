@@ -85,6 +85,29 @@ def test_qsa_selection_auxiliary_loss_trains_the_discrete_indexer():
     assert indexer.index_qk_proj.weight.grad.abs().sum() > 0
 
 
+def test_qsa_selection_loss_accepts_compact_teacher_block_masses():
+    torch.manual_seed(59)
+    indexer = QSAIndexer(
+        hidden_size=8,
+        index_n_heads=2,
+        index_head_dim=4,
+        token_budget=4,
+        compress_ratio=2,
+        rotary_dim=2,
+        rope_theta=100.0,
+    )
+    hidden = torch.randn(1, 6, 8)
+    positions = torch.arange(6).unsqueeze(0)
+    causal = torch.tril(torch.ones(1, 1, 6, 6, dtype=torch.bool))
+    teacher = torch.softmax(torch.randn(1, 3, 6, 6).masked_fill(~causal, -1e4), dim=-1)
+    compact_mass = teacher.sum(dim=1).view(1, 6, 3, 2).sum(dim=-1)
+
+    dense_loss = indexer.selection_loss(hidden, positions, causal, teacher)
+    compact_loss = indexer.selection_loss(hidden, positions, causal, compact_mass)
+
+    torch.testing.assert_close(compact_loss, dense_loss, atol=1e-6, rtol=1e-6)
+
+
 def test_qsa_attention_adapter_runs_sparse_prefill_and_backpropagates():
     torch.manual_seed(53)
     attention = QSAQwen3MoeAttentionAdapter(

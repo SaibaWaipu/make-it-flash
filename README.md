@@ -11,12 +11,12 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 実行する3段階:
 
 1. **prepare** — SFT を streaming で読み、token quota に従って calibration JSONL を作成します。既定値は 100K tokens / sequence 長 2048 です。
-2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
-3. **fit** — Transformers の Qwen3NextGatedDeltaNet を teacher forcing の MSE で局所 fitting します。GDN head layout はQwen3.8-Flash-Next参照値のQK 16 / V 48、head dim 128、sigmoid output gateです。
+2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。QSA fitting用に、指定した1層だけdense teacher attentionを計算してmicro-blockごとのmassへ集約し、圧縮保存できます。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
+3. **fit / fit-qsa** — GDNはteacher forcingのMSE、QSAは出力MSE＋teacher attention block-massのselector lossで、それぞれ1層ずつ局所fittingします。全32層を自動変換する処理ではありません。
 
 GDN/QSA attention adapterとhybrid cacheをCPU tiny-modelで検証しています。GDN recurrent state・QSA indexer raw-key state・通常KVを持つ `FlashNextDynamicCache` は `create_flash_next_cache` で作成し、QSA/GDN混在時のprefill→incremental decode parityを確認しました。GDN-onlyには `configure_hybrid_cache` も使えます。static/offloaded cacheや最適化済みlong-context kernelは未対応です。
 
-GDN、block-indexed QSA、4-stream Gated Residual、compact hashed PLE/ngram、tied-embedding MTP head、shared-expert add-onの再利用可能なprototypeを実装しました。まだ含まないもの: fitted 24 GDN + 8 QSAの全32層hybrid checkpoint、selector supervisionを含むQSA/PLE/Gated Residualの学習pipeline、global calibration、Japanese perplexity / generation品質評価、long-context performance検証、vision/video、RLVR。
+GDN、block-indexed QSA、4-stream Gated Residual、compact hashed PLE/ngram、tied-embedding MTP head、shared-expert add-onの再利用可能なprototypeを実装しました。まだ含まないもの: fitted 24 GDN + 8 QSAの全32層hybrid checkpoint、実teacher cacheを使ったQSA fitting run、PLE/Gated Residualの学習・decoder統合、global calibration、Japanese perplexity / generation品質評価、long-context performance検証、vision/video、RLVR。QSA用のdense attentionからblock massへの集約と1層fit pipelineは実装済みですが、実モデルのteacher dataでは未実行です。
 
 ## Qwen3.8-Flash-Next reference
 
@@ -74,6 +74,26 @@ Teacher cache と fitting (十分な GPU がある場合のみ):
       --epochs 3 \
       --max-steps 200
 
+QSAのselector学習では、dense teacher attentionをGPU上で計算した後、micro-block massだけを圧縮保存します（dense行列計算のため一度に1層のみ）。既定budgetは2048 tokens、compression ratioは4なので、実際のtop-k pruningを学習データで観察するには少なくとも2052 token長の系列が必要です。例えば `--max-seq-len 4096` でprepareします。2048以下でもscore surrogateは学習できますが、pruning自体は起こらず、metricsに警告が記録されます。
+
+    make-it-flash prepare \
+      --output-dir artifacts/qsa-data \
+      --max-tokens 100000 \
+      --max-seq-len 4096
+
+    make-it-flash cache \
+      --data-file artifacts/qsa-data/calibration.jsonl \
+      --output-dir artifacts/qsa-cache-layer-03 \
+      --layers 3 \
+      --attention-layers 3
+
+    make-it-flash fit-qsa \
+      --cache-dir artifacts/qsa-cache-layer-03 \
+      --output-dir artifacts/qsa \
+      --layer 3
+
+QSA fitは1層のみの局所fitです。実際のteacher cache取得にはGPUが必要ですが、このREADME更新では有料Jobを実行していません。
+
 prepare の出力 mix が目標に達しない場合は data_manifest.json の actual_tokens_by_category と skipped_rows_by_config を確認してください。上書きには各 stage の --overwrite を明示します。
 
 ## Hybrid cache（GDN recurrent + attention KV）
@@ -102,15 +122,9 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
     # Default is a cost-estimated dry run; no job is submitted.
     MIF_GIT_REF=gdn-4.1-pilot bash scripts/run_hf_job.sh
 
-    # Launch only after explicit approval; pin the exact source commit and budget.
-    MIF_LAUNCH_HF_JOB=1 \
-      MIF_APPROVED_BUDGET_USD=9.00 \
-      MIF_GIT_REF=gdn-4.1-pilot \
-      MIF_GIT_COMMIT="$(git rev-parse HEAD)" \
-      MIF_OUTPUT_REPO=YOUR_HF_USERNAME/llm-jp-41-gdn-pilot \
-      bash scripts/run_hf_job.sh
+Launchは個別の明示承認後に限ります。実行時には per-job 上限 `MIF_APPROVED_BUDGET_USD` に加えて、pilotを含む請求確認済みの累計 `MIF_CONFIRMED_CUMULATIVE_SPENT_USD` を必須入力とし、per-job上限を加えても累計 $9 を超えないことを確認します。pilot費用はログ上約 $0.27と推定しましたが請求額は未確認なので、その推定値だけでlaunchしないでください。
 
-既定は `a100-large`、timeout 3時間、10K tokens・seq len 1024・1 epoch・最大20 stepsです。runnerは毎回`hf jobs hardware --json`でrateを取得し、timeoutまで動いた場合の最大compute costを計算して、承認budgetを超えるとlaunchを拒否します。現時点のHF CLI表示はA100 80GBが $2.50/時で、3時間上限は約 $7.50（今回承認された上限は合計 $9）です。価格変更時はlive rateで再計算します。ジョブはGDN checkpointとfit metricsのみをprivate repoへuploadし、calibration dataとactivation cacheはuploadしません。**dry-runが既定で、README例をそのまま実行してもジョブは起動しません。**
+既定は `a100-large`、timeout 3時間、10K tokens・seq len 1024・1 epoch・最大20 stepsです。runnerは毎回 `hf jobs hardware --json` でrateを取得し、timeoutまで動いた場合の最大compute costを計算します。現時点のHF CLI表示はA100 80GBが $2.50/時で、3時間上限は約 $7.50です。価格変更時はlive rateで再計算します。ジョブはGDN checkpointとfit metricsのみをprivate repoへuploadし、calibration dataとactivation cacheはuploadしません。**dry-runが既定で、このREADMEのコマンドではジョブは起動しません。**
 
 ジョブは公開Git remoteの`gdn-4.1-pilot`をcloneし、必須の`MIF_GIT_COMMIT`と一致することを確認してから学習します。選択imageにgitがなければaptで追加します。ジョブ内でsource codeが実行されHF tokenも渡されるため、信頼できるremote/ref/commitを指定してください。
 
@@ -121,14 +135,14 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
 ## Outputs and privacy
 
 - artifacts/data/: tokenized calibration.jsonl, data_manifest.json
-- artifacts/cache/: sequence ごとの teacher input/output safetensors, cache_manifest.json
+- artifacts/cache/: sequence ごとの teacher input/output safetensors、任意のQSA block-mass targets、cache_manifest.json
 - artifacts/gdn/: 単独 GDN の safetensors と fit metrics JSON
 
 大きな data、cache、weights、Hub cache は [.gitignore](.gitignore) で除外しています。データセット由来のデータや派生物を公開・再配布する場合は、元 dataset の条件を別途確認してください。
 
 ## Validation status
 
-ローカル pytest は31件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・auxiliary selector loss、QSA/GDN混在の `FlashNextDynamicCache` prefill/decode parityを検証しました。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+ローカル pytest は40件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fit、QSA/GDN混在の `FlashNextDynamicCache` prefill/decode parityを検証しました。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
 
 2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 
