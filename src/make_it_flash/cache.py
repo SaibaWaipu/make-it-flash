@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from .model import get_decoder_layers, make_gdn_config
+from .provenance import validate_base_config_provenance, validate_model_revision
 
 
 def _read_jsonl(path: Path):
@@ -201,6 +202,7 @@ def cache_teacher_outputs(
     data_manifest = json.loads(data_manifest_path.read_text(encoding="utf-8"))
     model_id = data_manifest["model_id"]
     revision = data_manifest.get("model_revision", "main")
+    validate_model_revision(revision)
     selected = tuple(sorted(set(int(index) for index in layers)))
     attention_selected = tuple(sorted(set(int(index) for index in attention_layers)))
     if not selected:
@@ -225,6 +227,7 @@ def cache_teacher_outputs(
         raise FileExistsError(f"cache output already exists under {target_dir}; pass --overwrite")
 
     config = AutoConfig.from_pretrained(model_id, revision=revision, trust_remote_code=False)
+    validate_base_config_provenance(config, model_id, revision)
     if getattr(config, "model_type", None) != "qwen3_moe":
         raise ValueError(f"expected a qwen3_moe base model, got {getattr(config, 'model_type', None)!r}")
     layer_count = int(config.num_hidden_layers)

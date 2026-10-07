@@ -22,7 +22,12 @@ from .model import (
     make_gdn,
     make_qsa,
 )
-from .provenance import checkpoint_provenance, sha256_file
+from .provenance import (
+    checkpoint_provenance,
+    sha256_file,
+    validate_base_config_provenance,
+    validate_model_revision,
+)
 
 OVERLAY_FILENAME = "flash_next_overlay.json"
 OVERLAY_KIND = "make_it_flash.qwen3_moe_flash_next_overlay"
@@ -192,23 +197,11 @@ def _sha256(path: Path) -> str:
 
 
 def _validate_revision(revision: str) -> None:
-    if not isinstance(revision, str) or len(revision) != 40 or any(
-        char not in "0123456789abcdef" for char in revision.lower()
-    ):
-        raise ValueError("base_model_revision must be a pinned 40-character commit SHA")
+    validate_model_revision(revision)
 
 
 def _validate_base_provenance(config: Any, model_id: str, revision: str) -> None:
-    actual_model_id = getattr(config, "_name_or_path", None)
-    actual_revision = getattr(config, "_commit_hash", None)
-    if actual_model_id != model_id:
-        raise ValueError(
-            f"base config source is unverified: expected _name_or_path={model_id!r}, got {actual_model_id!r}"
-        )
-    if actual_revision != revision:
-        raise ValueError(
-            f"base config revision is unverified: expected _commit_hash={revision!r}, got {actual_revision!r}"
-        )
+    validate_base_config_provenance(config, model_id, revision)
 
 
 def _publish_staged_overlay(stage: Path, target: Path, *, overwrite: bool) -> None:

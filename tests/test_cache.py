@@ -72,7 +72,7 @@ def test_qsa_cache_preflight_rejects_short_data_before_gpu_or_model_load(tmp_pat
         encoding="utf-8",
     )
     data_file.with_name("data_manifest.json").write_text(
-        json.dumps({"model_id": "fixture/model", "model_revision": "fixture-sha"}),
+        json.dumps({"model_id": "fixture/model", "model_revision": "a" * 40}),
         encoding="utf-8",
     )
     output_dir = tmp_path / "qsa-cache"
@@ -115,11 +115,77 @@ def test_prune_stale_cache_shards_keeps_only_current_sequence_range(tmp_path):
     assert not (tmp_path / "sample_unexpected.safetensors").exists()
 
 
+def test_cache_requires_pinned_revision_before_config_or_gpu_checks(tmp_path, monkeypatch):
+    data_file = tmp_path / "calibration.jsonl"
+    data_file.write_text(json.dumps({"sample_id": "tiny", "input_ids": [1, 2]}) + "\n", encoding="utf-8")
+    data_file.with_name("data_manifest.json").write_text(
+        json.dumps({"model_id": "fixture/model", "model_revision": "main"}), encoding="utf-8"
+    )
+    output_dir = tmp_path / "cache"
+    monkeypatch.setattr(
+        AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: pytest.fail("unpinned revision must be rejected before config fetch"),
+    )
+    monkeypatch.setattr(
+        cache_module,
+        "_check_gpu_memory",
+        lambda *_: pytest.fail("unpinned revision must be rejected before GPU checks"),
+    )
+
+    with pytest.raises(ValueError, match="pinned 40-character commit SHA"):
+        cache_module.cache_teacher_outputs(data_file=data_file, output_dir=output_dir, layers=(0,))
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "actual_value", "message"),
+    [
+        ("_name_or_path", "wrong/model", "base config source is unverified"),
+        ("_commit_hash", "b" * 40, "base config revision is unverified"),
+    ],
+)
+def test_cache_rejects_unverified_config_before_gpu_or_weight_load(
+    tmp_path, monkeypatch, field, actual_value, message
+):
+    data_file = tmp_path / "calibration.jsonl"
+    data_file.write_text(json.dumps({"sample_id": "tiny", "input_ids": [1, 2]}) + "\n", encoding="utf-8")
+    data_file.with_name("data_manifest.json").write_text(
+        json.dumps({"model_id": "fixture/model", "model_revision": "a" * 40}), encoding="utf-8"
+    )
+    output_dir = tmp_path / "cache"
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=32,
+    )
+    config._name_or_path = "fixture/model"
+    config._commit_hash = "a" * 40
+    setattr(config, field, actual_value)
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    monkeypatch.setattr(
+        cache_module,
+        "_check_gpu_memory",
+        lambda *_: pytest.fail("unverified config must be rejected before GPU checks"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        cache_module.cache_teacher_outputs(data_file=data_file, output_dir=output_dir, layers=(0,))
+    assert not output_dir.exists()
+
+
 def test_failed_cache_overwrite_invalidates_old_manifest(tmp_path, monkeypatch):
     data_file = tmp_path / "calibration.jsonl"
     data_file.write_text(json.dumps({"sample_id": "new", "input_ids": [1, 2]}) + "\n", encoding="utf-8")
     data_file.with_name("data_manifest.json").write_text(
-        json.dumps({"model_id": "fixture/model", "model_revision": "fixture-sha"}),
+        json.dumps({"model_id": "fixture/model", "model_revision": "a" * 40}),
         encoding="utf-8",
     )
     output_dir = tmp_path / "cache"
@@ -141,6 +207,8 @@ def test_failed_cache_overwrite_invalidates_old_manifest(tmp_path, monkeypatch):
         num_experts_per_tok=2,
         moe_intermediate_size=32,
     )
+    config._name_or_path = "fixture/model"
+    config._commit_hash = "a" * 40
 
     class FakeTeacher:
         def __init__(self):

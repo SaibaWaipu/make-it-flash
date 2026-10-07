@@ -44,7 +44,7 @@ quota は最大剰余法で割り当て、実際に token 化した数と解決�
 
 - Python 3.10+
 - prepare: Hugging Face Hub へのネットワーク接続（モデル tokenizer と dataset）。CUDA は不要です。
-- cache / fit: CUDA 対応 PyTorch。cache は既定で **空き CUDA memory 66 GiB 以上**を確認します。固定した4.1 revisionには13 safetensors（64.28 GB / 59.87 GiB）があり、これはweightのstorage sizeのみで実際のVRAM要件ではありません。T4 × 2 の約29–32 GBではこのBF16 passは実行できず、A100 80 GBでも空きが66 GiB未満ならpreflightが停止します。
+- cache / fit: CUDA 対応 PyTorch。cache は40文字の固定commit SHAを要求し、`AutoConfig` のrepo ID/commitが要求値と一致することをweights load前に検証したうえで、既定で **空き CUDA memory 66 GiB 以上**を確認します。固定した4.1 revisionには13 safetensors（64.28 GB / 59.87 GiB）があり、これはweightのstorage sizeのみで実際のVRAM要件ではありません。T4 × 2 の約29–32 GBではこのBF16 passは実行できず、A100 80 GBでも空きが66 GiB未満ならpreflightが停止します。
 
 ## Quick start
 
@@ -154,7 +154,7 @@ Launchは個別の明示承認後に限ります。実行時には per-job 上�
 
 ## Validation status
 
-ローカル pytest は62件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cacheは短いQSA dataならteacher load前に、fit-qsaは独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+ローカル pytest は65件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cacheは短いQSA dataならteacher load前に、fit-qsaは独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
 
 2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 
