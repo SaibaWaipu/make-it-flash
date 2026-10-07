@@ -310,10 +310,15 @@ def test_qsa_gdn_hybrid_cache_preserves_incremental_decode_parity():
     graft_attention_modules(model, {0: qsa, 1: gdn})
     cache = create_flash_next_cache(model, gdn_layers=[1], qsa_layers=[0])
     assert cache.layer_types == ("indexed_attention", "linear_attention")
+    selector_masks = []
+    qsa.indexer.register_forward_hook(
+        lambda _module, _inputs, output: selector_masks.append(output.detach().clone())
+    )
 
-    prefix_ids = torch.tensor([[1, 2, 3], [0, 5, 6]])
-    prefix_mask = torch.tensor([[1, 1, 1], [0, 1, 1]])
-    next_ids = torch.tensor([[4], [7]])
+    # token_budget=4 and compress_ratio=2 first prune at six visible tokens.
+    prefix_ids = torch.tensor([[1, 2, 3, 4, 5, 6], [0, 5, 6, 7, 8, 9]])
+    prefix_mask = torch.tensor([[1, 1, 1, 1, 1, 1], [0, 1, 1, 1, 1, 1]])
+    next_ids = torch.tensor([[7], [10]])
     full_ids = torch.cat((prefix_ids, next_ids), dim=1)
     full_mask = torch.cat((prefix_mask, torch.ones(2, 1, dtype=prefix_mask.dtype)), dim=1)
     with torch.no_grad():
@@ -333,6 +338,10 @@ def test_qsa_gdn_hybrid_cache_preserves_incremental_decode_parity():
 
     assert torch.isfinite(cached_output).all()
     torch.testing.assert_close(cached_output, full_output[:, -1:], atol=3e-4, rtol=3e-4)
+    assert len(selector_masks) == 3  # full sequence, cached prefix, cached next token
+    assert selector_masks[0][0, 0, -1].sum().item() == 5  # 4-token top-k plus incomplete tail
+    assert selector_masks[1][0, 0, -1].sum().item() == 4  # two selected micro-blocks
+    assert selector_masks[2][0, 0, 0].sum().item() == 5  # cached QSA pruning remains active
 
 
 def test_gdn_adapter_uses_hybrid_dynamic_cache_for_incremental_decode():
