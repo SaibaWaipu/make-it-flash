@@ -27,6 +27,13 @@ QSA_TOKEN_BUDGET = 2048
 QSA_COMPRESS_RATIO = 4
 
 
+def _prune_stale_cache_shards(output_dir: Path, emitted: int) -> None:
+    expected = {f"sample_{index:06d}.safetensors" for index in range(emitted)}
+    for path in output_dir.glob("sample_*.safetensors"):
+        if path.name not in expected:
+            path.unlink()
+
+
 def _count_qsa_pruning_candidates(
     data_file: str | Path,
     *,
@@ -247,6 +254,9 @@ def cache_teacher_outputs(
     embedding_device = model.get_input_embeddings().weight.device
     emitted = 0
     token_count = 0
+    if overwrite:
+        # Any subsequent shard write makes the old manifest describe a mixed cache.
+        marker.unlink(missing_ok=True)
     try:
         with torch.inference_mode():
             for row in _read_jsonl(source_path):
@@ -286,6 +296,8 @@ def cache_teacher_outputs(
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    if emitted == 0:
+        raise ValueError("teacher cache capture produced no usable examples; refusing to publish an empty cache")
 
     base_fields = {
         "model_type": config.model_type,
@@ -329,5 +341,6 @@ def cache_teacher_outputs(
         "qsa_config": qsa_fields,
         "note": "cache contains teacher-forced local attention input/output pairs; optional teacher attention is reduced to complete micro-block masses for attention_layers; this is not a merged hybrid checkpoint",
     }
+    _prune_stale_cache_shards(target_dir, emitted)
     marker.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
