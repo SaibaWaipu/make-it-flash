@@ -156,11 +156,17 @@ def _validate_fit_metrics(
             raise ValueError(
                 f"QSA layer {layer} was not trained on sequences long enough to exercise top-k pruning"
             )
+        pruning_validation_examples = int(metrics.get("selector_pruning_validation_examples", 0))
+        if pruning_validation_examples <= 0:
+            raise ValueError(
+                f"QSA layer {layer} has no independent validation example that exercises top-k pruning"
+            )
         selector_validation = {
             "selector_loss_weight": selector_weight,
             "initial_selection_loss": initial_selector,
             "selected_checkpoint_selection_loss": final_selector,
             "selection_relative_improvement": selector_improvement,
+            "selector_pruning_validation_examples": pruning_validation_examples,
         }
     if not math.isfinite(initial) or not math.isfinite(best) or initial <= 0 or best < 0:
         raise ValueError(f"layer {layer} has invalid validation losses")

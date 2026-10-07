@@ -66,6 +66,7 @@ def test_fit_qsa_layer_writes_standalone_checkpoint_from_teacher_maps(tmp_path: 
 
     assert metrics["steps"] == 1
     assert metrics["selector_pruning_examples"] == 2
+    assert metrics["selector_pruning_validation_examples"] == 2
     assert metrics["initial_validation"]["selection_loss"] >= 0
     checkpoint = output_dir / "qsa_layer_00.safetensors"
     assert checkpoint.is_file()

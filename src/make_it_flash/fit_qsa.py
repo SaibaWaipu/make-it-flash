@@ -161,13 +161,22 @@ def fit_qsa_layer(
         validation_paths = train_paths[: min(4, len(train_paths))]
 
     input_key = f"layer_{layer:02d}_input"
-    train_sequence_lengths = []
-    for path in train_paths:
-        with safe_open(str(path), framework="pt", device="cpu") as handle:
-            train_sequence_lengths.append(handle.get_slice(input_key).get_shape()[0])
+
+    def _sequence_lengths(paths: list[Path]) -> list[int]:
+        lengths = []
+        for path in paths:
+            with safe_open(str(path), framework="pt", device="cpu") as handle:
+                lengths.append(handle.get_slice(input_key).get_shape()[0])
+        return lengths
+
+    train_sequence_lengths = _sequence_lengths(train_paths)
+    validation_sequence_lengths = _sequence_lengths(validation_paths)
     max_train_sequence_length = max(train_sequence_lengths)
     pruning_threshold = (token_budget // compress_ratio + 1) * compress_ratio
     selector_pruning_examples = sum(length >= pruning_threshold for length in train_sequence_lengths)
+    selector_pruning_validation_examples = sum(
+        length >= pruning_threshold for length in validation_sequence_lengths
+    )
 
     base = SimpleNamespace(**manifest["base_config"])
     torch.manual_seed(seed)
@@ -251,6 +260,7 @@ def fit_qsa_layer(
         "max_train_sequence_length": max_train_sequence_length,
         "selector_pruning_threshold_tokens": pruning_threshold,
         "selector_pruning_examples": selector_pruning_examples,
+        "selector_pruning_validation_examples": selector_pruning_validation_examples,
         "selector_pruning_warning": (
             None if selector_pruning_examples else "training sequences did not exceed token_budget by a full micro-block"
         ),
