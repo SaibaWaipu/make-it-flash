@@ -67,6 +67,14 @@ fi
 : "${MIF_CONFIRMED_CUMULATIVE_SPENT_USD:?Set the invoice-confirmed prior spend, including the original pilot}"
 : "${MIF_OUTPUT_REPO:?Set MIF_OUTPUT_REPO to a private Hub model repo for the fitted layer}"
 : "${MIF_GIT_COMMIT:?Set MIF_GIT_COMMIT to the exact approved source commit}"
+if [[ ! "$MIF_GIT_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo "MIF_GIT_COMMIT must be an exact 40-character commit SHA" >&2
+  exit 2
+fi
+if [[ ! "$MIF_MODEL_REVISION" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo "MIF_MODEL_REVISION must be a pinned 40-character commit SHA" >&2
+  exit 2
+fi
 if ! python - "$MIF_APPROVED_BUDGET_USD" "$HF_ESTIMATED_COST_USD" "$MIF_CONFIRMED_CUMULATIVE_SPENT_USD" "$ENGINEERING_CUMULATIVE_CAP_USD" <<'PY'
 from decimal import Decimal, InvalidOperation
 import sys

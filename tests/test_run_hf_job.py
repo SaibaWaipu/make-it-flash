@@ -59,7 +59,7 @@ def test_hf_job_runner_refuses_over_budget_before_submission(tmp_path):
         MIF_APPROVED_BUDGET_USD="8.73",
         MIF_CONFIRMED_CUMULATIVE_SPENT_USD="0.27",
         MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
-        MIF_GIT_COMMIT="deadbeef",
+        MIF_GIT_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         HF_TIMEOUT="4h",
     )
 
@@ -76,7 +76,7 @@ def test_hf_job_runner_launches_only_with_budget_and_required_pins(tmp_path):
         MIF_APPROVED_BUDGET_USD="8.73",
         MIF_CONFIRMED_CUMULATIVE_SPENT_USD="0.27",
         MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
-        MIF_GIT_COMMIT="deadbeef",
+        MIF_GIT_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
     assert result.returncode == 0, result.stderr
@@ -94,11 +94,42 @@ def test_hf_job_runner_requires_invoice_confirmed_prior_spend(tmp_path):
         MIF_LAUNCH_HF_JOB="1",
         MIF_APPROVED_BUDGET_USD="8.73",
         MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
-        MIF_GIT_COMMIT="deadbeef",
+        MIF_GIT_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
     assert result.returncode != 0
     assert "invoice-confirmed prior spend" in result.stderr
+    assert "MOCK_HF_JOBS_RUN" not in result.stdout
+
+
+def test_hf_job_runner_rejects_unpinned_source_before_submission(tmp_path):
+    result = _run_runner(
+        tmp_path,
+        MIF_LAUNCH_HF_JOB="1",
+        MIF_APPROVED_BUDGET_USD="8.73",
+        MIF_CONFIRMED_CUMULATIVE_SPENT_USD="0.27",
+        MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
+        MIF_GIT_COMMIT="deadbeef",
+    )
+
+    assert result.returncode == 2
+    assert "MIF_GIT_COMMIT must be an exact 40-character commit SHA" in result.stderr
+    assert "MOCK_HF_JOBS_RUN" not in result.stdout
+
+
+def test_hf_job_runner_rejects_unpinned_teacher_before_submission(tmp_path):
+    result = _run_runner(
+        tmp_path,
+        MIF_LAUNCH_HF_JOB="1",
+        MIF_APPROVED_BUDGET_USD="8.73",
+        MIF_CONFIRMED_CUMULATIVE_SPENT_USD="0.27",
+        MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
+        MIF_GIT_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        MIF_MODEL_REVISION="main",
+    )
+
+    assert result.returncode == 2
+    assert "MIF_MODEL_REVISION must be a pinned 40-character commit SHA" in result.stderr
     assert "MOCK_HF_JOBS_RUN" not in result.stdout
 
 
@@ -109,7 +140,7 @@ def test_hf_job_runner_enforces_remaining_cumulative_cap(tmp_path):
         MIF_APPROVED_BUDGET_USD="7.50",
         MIF_CONFIRMED_CUMULATIVE_SPENT_USD="2.00",
         MIF_OUTPUT_REPO="RemydreScarlet/private-pilot",
-        MIF_GIT_COMMIT="deadbeef",
+        MIF_GIT_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
     assert result.returncode == 3
