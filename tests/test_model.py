@@ -6,7 +6,12 @@ from safetensors.torch import load_file, save_file
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
-from make_it_flash.model import GDNQwen3MoeAttentionAdapter, _SigmoidRMSNormGated, make_gdn
+from make_it_flash.model import (
+    GDNQwen3MoeAttentionAdapter,
+    _SigmoidRMSNormGated,
+    configure_hybrid_cache,
+    make_gdn,
+)
 
 
 def test_gdn_shapes_match_hidden_size():
@@ -51,12 +56,12 @@ def test_qwen38_output_gate_uses_sigmoid():
     assert torch.allclose(norm(hidden, gate), torch.full_like(hidden, 0.5))
 
 
-def _tiny_qwen3_moe_config():
+def _tiny_qwen3_moe_config(num_hidden_layers=1):
     return Qwen3MoeConfig(
         vocab_size=64,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=1,
+        num_hidden_layers=num_hidden_layers,
         num_attention_heads=4,
         num_key_value_heads=2,
         max_position_embeddings=32,
@@ -181,3 +186,33 @@ def test_gdn_attention_adapter_fails_closed_on_cache_and_nonstandard_masks():
     assert output.shape == hidden.shape
     assert weights is None
     assert torch.isfinite(output).all()
+
+
+def test_gdn_adapter_uses_hybrid_dynamic_cache_for_incremental_decode():
+    torch.manual_seed(29)
+    config = _tiny_qwen3_moe_config(num_hidden_layers=2)
+    model = Qwen3MoeModel(config)
+    gdn = make_gdn(SimpleNamespace(**config.to_dict()), 0, key_heads=4, value_heads=8)
+    model.layers[0].self_attn = GDNQwen3MoeAttentionAdapter(gdn)
+    model.eval()
+
+    assert configure_hybrid_cache(model, [0]) == ["linear_attention", "full_attention"]
+    prefix_ids = torch.tensor([[1, 2, 3, 4], [0, 5, 6, 7]])
+    prefix_mask = torch.tensor([[1, 1, 1, 1], [0, 1, 1, 1]])
+    next_ids = torch.tensor([[8], [9]])
+    full_ids = torch.cat((prefix_ids, next_ids), dim=1)
+    full_mask = torch.cat((prefix_mask, torch.ones(2, 1, dtype=prefix_mask.dtype)), dim=1)
+
+    with torch.no_grad():
+        full_output = model(input_ids=full_ids, attention_mask=full_mask, use_cache=False).last_hidden_state
+        prefix_output = model(input_ids=prefix_ids, attention_mask=prefix_mask, use_cache=True)
+        cached_output = model(
+            input_ids=next_ids,
+            attention_mask=full_mask,
+            past_key_values=prefix_output.past_key_values,
+            use_cache=True,
+        ).last_hidden_state
+
+    assert cached_output.shape == (2, 1, config.hidden_size)
+    assert torch.isfinite(cached_output).all()
+    torch.testing.assert_close(cached_output, full_output[:, -1:], atol=2e-4, rtol=2e-4)

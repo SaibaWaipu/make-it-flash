@@ -76,6 +76,18 @@ Teacher cache と fitting (十分な GPU がある場合のみ):
 
 prepare の出力 mix が目標に達しない場合は data_manifest.json の actual_tokens_by_category と skipped_rows_by_config を確認してください。上書きには各 stage の --overwrite を明示します。
 
+## Hybrid cache（GDN recurrent + attention KV）
+
+GDN graft 後に Transformers `DynamicCache` を使う場合は、最初の `generate(..., use_cache=True)` より前に対象 layer index を設定します。GDN layer は conv/recurrent state、他の dense/QSA layer は通常の KV cache を持ちます。
+
+```python
+from make_it_flash.model import configure_hybrid_cache
+
+configure_hybrid_cache(model, gdn_layers=[0, 3, 6])
+```
+
+この試作では標準 causal mask と binary padding mask の DynamicCache decode を検証しています。static cache・独自 sparse mask はまだ fail-closed です。
+
 ## Hugging Face Jobs（標準の実行方法）
 
 通常の GPU 実行には [scripts/run_hf_job.sh](scripts/run_hf_job.sh) を使います。ジョブ内で prepare → teacher cache → 1層の GDN fit を順に実行します。既定teacherは `llm-jp/llm-jp-4.1-32b-a3b-thinking` と固定revision `cda260706786758045e5e96bf4d738bbc01155b5`（`MIF_MODEL` / `MIF_MODEL_REVISION` で変更可能）です。別モデルに変更する際は対応するrevisionも指定してください。4.1向けの更新は [SaibaWaipu/make-it-flash](https://github.com/SaibaWaipu/make-it-flash) の `gdn-4.1-pilot` branch にpush済みです。実行例では `MIF_GIT_REF` でこのbranchを選びます。開始時にcloneしたcommit hashをジョブログへ表示します。

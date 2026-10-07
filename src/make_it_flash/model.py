@@ -30,6 +30,7 @@ class _SigmoidRMSNormGated(nn.Module):
 def get_decoder_layers(model: Any) -> Any:
     """Return the Qwen-style decoder layer list or fail with a useful error."""
     candidates = (
+        getattr(model, "layers", None),
         getattr(getattr(model, "model", None), "layers", None),
         getattr(getattr(getattr(model, "model", None), "model", None), "layers", None),
     )
@@ -87,12 +88,45 @@ def make_gdn(base_config: Any, layer_idx: int, *, key_heads: int | None = None, 
     return gdn
 
 
-class GDNQwen3MoeAttentionAdapter(nn.Module):
-    """Expose GDN through Qwen3-MoE's attention tuple interface, without caching.
+def configure_hybrid_cache(model: Any, gdn_layers: list[int] | tuple[int, ...]) -> list[str]:
+    """Configure Transformers' DynamicCache for GDN and full-attention layers.
 
-    Supports no mask, a 2-D binary padding mask, or Qwen3-MoE's standard
-    4-D causal mask combined with binary key padding. Hybrid cache state and
-    nonstandard/sparse masks remain unsupported and fail explicitly.
+    Call this before the first cached forward pass. GDN indices use the same
+    decoder-layer numbering as ``model.layers``; all other layers use standard
+    attention KV-cache layers.
+    """
+    decoder_layers = get_decoder_layers(model)
+    layer_count = len(decoder_layers)
+    indices = tuple(gdn_layers)
+    if any(not isinstance(index, int) or isinstance(index, bool) for index in indices):
+        raise ValueError("GDN layer indices must be integers")
+    if len(set(indices)) != len(indices):
+        raise ValueError("GDN layer indices must not contain duplicates")
+    if any(index < 0 or index >= layer_count for index in indices):
+        raise ValueError(f"GDN layer indices must be in [0, {layer_count})")
+
+    config = getattr(model, "config", None)
+    if config is None:
+        raise ValueError("model must expose a Transformers config")
+    decoder_config = config.get_text_config(decoder=True) if hasattr(config, "get_text_config") else config
+    if getattr(decoder_config, "model_type", None) != "qwen3_moe":
+        raise ValueError(f"unsupported cache model_type: {getattr(decoder_config, 'model_type', None)!r}")
+    gdn_indices = set(indices)
+    layer_types = [
+        "linear_attention" if layer_idx in gdn_indices else "full_attention"
+        for layer_idx in range(layer_count)
+    ]
+    decoder_config.layer_types = layer_types
+    return layer_types
+
+
+class GDNQwen3MoeAttentionAdapter(nn.Module):
+    """Expose GDN through Qwen3-MoE's attention and hybrid-cache interfaces.
+
+    Supports no mask, a 2-D binary padding mask, or standard 4-D causal masks
+    with optional binary key padding. For cached generation, configure the
+    model with :func:`configure_hybrid_cache` before creating DynamicCache.
+    Nonstandard/sparse masks and incompatible cache layouts fail closed.
     """
 
     def __init__(self, gdn: nn.Module) -> None:
@@ -105,17 +139,20 @@ class GDNQwen3MoeAttentionAdapter(nn.Module):
     ) -> torch.Tensor | None:
         if attention_mask is None:
             return None
-        batch_size, sequence_length = hidden_states.shape[:2]
+        batch_size, query_length = hidden_states.shape[:2]
         attention_mask = attention_mask.to(device=hidden_states.device)
-        if attention_mask.ndim == 2 and tuple(attention_mask.shape) == (batch_size, sequence_length):
-            return attention_mask.to(dtype=torch.bool)
+        if attention_mask.ndim == 2:
+            if attention_mask.shape[0] != batch_size or attention_mask.shape[1] < query_length:
+                raise NotImplementedError("2-D padding masks must cover the current GDN input")
+            return attention_mask[:, -query_length:].to(dtype=torch.bool)
         if (
             attention_mask.ndim != 4
             or attention_mask.shape[0] != batch_size
             or attention_mask.shape[1] != 1
-            or tuple(attention_mask.shape[-2:]) != (sequence_length, sequence_length)
+            or attention_mask.shape[-2] != query_length
+            or attention_mask.shape[-1] < query_length
         ):
-            raise NotImplementedError("unsupported attention mask shape for no-cache GDN adapter")
+            raise NotImplementedError("unsupported attention mask shape for GDN adapter")
         if attention_mask.dtype == torch.bool:
             allowed = attention_mask
         elif attention_mask.is_floating_point():
@@ -123,15 +160,16 @@ class GDNQwen3MoeAttentionAdapter(nn.Module):
         else:
             raise NotImplementedError("4-D attention masks must be boolean or additive floating point")
 
+        key_length = allowed.shape[-1]
         key_valid = allowed.any(dim=-2).squeeze(1)
         query_valid = allowed.any(dim=-1).squeeze(1)
-        causal = torch.ones(
-            (sequence_length, sequence_length), device=hidden_states.device, dtype=torch.bool
-        ).tril()
+        query_positions = torch.arange(query_length, device=hidden_states.device) + key_length - query_length
+        key_positions = torch.arange(key_length, device=hidden_states.device)
+        causal = key_positions[None, :] <= query_positions[:, None]
         expected = causal[None, None, :, :] & query_valid[:, None, :, None] & key_valid[:, None, None, :]
         if not torch.equal(allowed, expected):
             raise NotImplementedError("only standard causal masks with binary padding are supported")
-        return key_valid
+        return key_valid[:, -query_length:]
 
     def forward(
         self,
@@ -141,9 +179,31 @@ class GDNQwen3MoeAttentionAdapter(nn.Module):
         use_cache: bool | None = False,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, None]:
-        if use_cache or past_key_values is not None:
-            raise NotImplementedError("hybrid Qwen3-MoE/GDN cache support is not implemented")
+        if use_cache and past_key_values is None:
+            raise NotImplementedError("cached GDN calls require a hybrid DynamicCache")
         if kwargs.get("output_attentions", False):
             raise NotImplementedError("GDN does not provide attention weights")
+        if past_key_values is not None:
+            from transformers.cache_utils import DynamicCache
+
+            if not isinstance(past_key_values, DynamicCache):
+                raise NotImplementedError("only Transformers DynamicCache is supported for cached GDN calls")
+            layer_idx = getattr(self.gdn, "layer_idx", None)
+            cache_layers = getattr(past_key_values, "layers", None)
+            required_methods = ("has_previous_state", "update_conv_state", "update_recurrent_state")
+            if (
+                not isinstance(layer_idx, int)
+                or cache_layers is None
+                or layer_idx < 0
+                or layer_idx >= len(cache_layers)
+                or not all(callable(getattr(past_key_values, name, None)) for name in required_methods)
+                or not all(
+                    hasattr(cache_layers[layer_idx], name)
+                    for name in ("has_previous_state", "update_conv_state", "update_recurrent_state")
+                )
+            ):
+                raise NotImplementedError(
+                    "past_key_values must be a DynamicCache configured with a linear_attention layer at this index"
+                )
         padding_mask = self._padding_mask(hidden_states, attention_mask)
-        return self.gdn(hidden_states, attention_mask=padding_mask), None
+        return self.gdn(hidden_states, cache_params=past_key_values, attention_mask=padding_mask), None
