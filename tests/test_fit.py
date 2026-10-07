@@ -56,3 +56,47 @@ def test_fit_writes_standalone_checkpoint(tmp_path: Path):
     assert metrics["steps"] == 1
     assert (output_dir / "gdn_layer_00.safetensors").is_file()
     assert (output_dir / "fit_layer_00.json").is_file()
+
+
+def test_fit_one_step_at_llm_jp_41_width(tmp_path: Path):
+    cache_dir = tmp_path / "cache-llmjp41"
+    output_dir = tmp_path / "fit-llmjp41"
+    cache_dir.mkdir()
+    manifest = {
+        "model_id": "llm-jp/llm-jp-4.1-32b-a3b-thinking",
+        "model_revision": "cda260706786758045e5e96bf4d738bbc01155b5",
+        "layers": [0],
+        "base_config": {
+            "model_type": "qwen3_moe",
+            "hidden_size": 2560,
+            "vocab_size": 196608,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 40,
+            "head_dim": 128,
+            "intermediate_size": 7680,
+            "rms_norm_eps": 1e-6,
+        },
+        "gdn_config": {"linear_num_key_heads": 20, "linear_num_value_heads": 40},
+    }
+    (cache_dir / "cache_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    save_file(
+        {
+            "layer_00_input": torch.randn(2, 2560).to(torch.bfloat16).contiguous(),
+            "layer_00_target": torch.randn(2, 2560).to(torch.bfloat16).contiguous(),
+        },
+        str(cache_dir / "sample_000000.safetensors"),
+        metadata={"sample_id": "synthetic-4.1-width", "config": "synthetic"},
+    )
+
+    metrics = fit_one_layer(
+        cache_dir=cache_dir,
+        output_dir=output_dir,
+        layer=0,
+        epochs=1,
+        max_steps=1,
+        validation_fraction=0,
+        allow_cpu=True,
+    )
+    assert metrics["steps"] == 1
+    assert metrics["model_id"] == "llm-jp/llm-jp-4.1-32b-a3b-thinking"
+    assert (output_dir / "gdn_layer_00.safetensors").is_file()

@@ -1,6 +1,6 @@
-# Kaggle 実行
+# Kaggle 実行（任意・旧手順）
 
-この notebook はパッケージソースを埋め込んだ self-contained 版です。作業ディレクトリを project root にして実行してください。
+この notebook はパッケージソースを埋め込んだ self-contained 版です。現在の標準実行先は Kaggle ではなく Hugging Face Jobs です。HF Jobs の手順は project root の [README](../README.md) を参照してください。作業ディレクトリを project root にして実行してください。
 
 ## 実行手順
 
@@ -12,4 +12,4 @@ Notebook はまず calibration data を準備します。空き VRAM が66 GiB�
 
 ## 検証メモ
 
-2026-10-06 の private kernel 実行では、Kaggle runtime が CPU-only PyTorch を報告し、Hugging Face Hub の DNS 解決にも失敗しました。calibration data / model weights のダウンロード前に停止しており、これはその実行環境での制約です。再実行前に GPU 割当と huggingface.co への接続を確認してください。代替手段は project root の README にある HF Jobs 手順です。
+2026-10-06 の private kernel 実行では、Kaggle runtime が CPU-only PyTorch を報告し、Hugging Face Hub の DNS 解決にも失敗しました。calibration data / model weights のダウンロード前に停止しており、これはその実行環境での制約です。再実行前に GPU 割当と huggingface.co への接続を確認してください。標準の実行先は project root の README にある HF Jobs 手順です。

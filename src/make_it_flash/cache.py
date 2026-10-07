@@ -26,7 +26,7 @@ def _read_jsonl(path: Path):
 def _check_gpu_memory(min_free_gib: float) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "teacher activation capture requires a CUDA GPU; run the Kaggle GPU notebook or an HF A100 job"
+            "teacher activation capture requires a CUDA GPU; run the documented Hugging Face Jobs workflow on an A100"
         )
     free_bytes = sum(torch.cuda.mem_get_info(index)[0] for index in range(torch.cuda.device_count()))
     free_gib = free_bytes / (1024**3)

@@ -144,7 +144,7 @@ def _stable_seed(seed: int, config: str) -> int:
 def prepare_calibration_data(
     *,
     output_dir: str | Path,
-    model_id: str = "llm-jp/llm-jp-4-32b-a3b-base",
+    model_id: str = "llm-jp/llm-jp-4.1-32b-a3b-thinking",
     model_revision: str = "main",
     dataset_id: str = DATASET_ID,
     dataset_revision: str = "main",

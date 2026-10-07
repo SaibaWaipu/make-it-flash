@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-DEFAULT_MODEL = "llm-jp/llm-jp-4-32b-a3b-base"
+DEFAULT_MODEL = "llm-jp/llm-jp-4.1-32b-a3b-thinking"
 
 
 def _json_output(value):

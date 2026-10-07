@@ -90,7 +90,7 @@ def build_notebook() -> dict:
                 "if GPU_READY:\n",
                 "    subprocess.run([sys.executable, '-m', 'make_it_flash.cli', 'cache', '--data-file', str(DATA / 'calibration.jsonl'), '--output-dir', str(CACHE), '--layers', '0'], cwd=PROJECT, check=True)\n",
                 "else:\n",
-                "    print('Teacher cache skipped before weight download; use the documented HF A100 fallback.')\n",
+                "    print('Teacher cache skipped before weight download; use the recommended Hugging Face Jobs workflow.')\n",
             ],
         },
         {
