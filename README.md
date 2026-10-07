@@ -14,7 +14,7 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
 3. **fit** — Transformers の Qwen3NextGatedDeltaNet を teacher forcing の MSE で局所 fitting します。GDN head layout はQwen3.8-Flash-Next参照値のQK 16 / V 48、head dim 128、sigmoid output gateです。
 
-限定的な `Qwen3MoeAttention` adapterで、tiny Qwen3-MoE decoderへのno-cache graftをCPU検証しています。対応範囲はmaskなしまたは2-D binary padding maskのみで、prepared causal maskとhybrid cacheは未対応です。
+限定的な `Qwen3MoeAttention` adapterで、tiny Qwen3-MoEへのno-cache graftをCPU検証しています。maskなし・2-D binary maskに加え、標準的な4-D causal maskからleft/right paddingを抽出できます。nonstandard/sparse mask、hybrid cache、attention weights出力は未対応で、明示的に拒否します。
 
 まだ含まないもの: 全32層の置換、24 GDN + 8 Qwen Sparse Attention (QSA) への統合、ロード可能なhybrid checkpoint、Gated Residual、N-gram/PLE embeddings、cache-aware generation、global calibration、perplexity / 生成品質評価、RLVR。
 
@@ -107,7 +107,7 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
 
 ## Validation status
 
-ローカル pytest は14件通過しました。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。stream worker終了警告はmanifestに記録されていますが、全100 tokensが保存されています。hidden size 2560・QK 16/V 48・sigmoid gateのGDN CPU forwardと、合成activationを使った1 step CPU fitも通過しています（実teacher出力によるfitではありません）。さらにtiny Qwen3-MoE decoder/modelにGDN adapterを挿すno-cache/no-padding CPU smoke、GDN safetensorsのsave/reload出力一致、MoE/Norm保持を検証しました。cacheと4-D causal maskはadapterが明示的に拒否します。32B BF16重みのGPU load、実activation fit、HF Jobs完走は未検証です。Qwen3.8本体の `qwen4_exp` はローカルTransformers 5.5.0では未対応です。
+ローカル pytest は14件通過しました。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。stream worker終了警告はmanifestに記録されていますが、全100 tokensが保存されています。hidden size 2560・QK 16/V 48・sigmoid gateのGDN CPU forwardと、合成activationを使った1 step CPU fitも通過しています（実teacher出力によるfitではありません）。さらにtiny Qwen3-MoE decoder/modelにGDN adapterを挿し、left/right paddingを含む標準causal maskでno-cache CPU forwardを検証しました。GDN safetensors再読込後も出力が一致し、MoE/Normは保持されます。hybrid cacheとnonstandard/sparse maskは未対応です。32B BF16重みのGPU load、実activation fit、HF Jobs完走は未検証です。Qwen3.8本体の `qwen4_exp` はローカルTransformers 5.5.0では未対応です。
 
 ## License
 

@@ -84,7 +84,8 @@ def test_gdn_attention_adapter_grafts_and_reloads_in_tiny_model(tmp_path):
         if not name.startswith("self_attn.")
     }
     hidden = torch.randn(1, 3, config.hidden_size)
-    input_ids = torch.tensor([[1, 2, 3]])
+    input_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+    input_mask = torch.tensor([[1, 1, 1, 0], [0, 1, 1, 1]])
     position_ids = torch.arange(hidden.shape[1]).unsqueeze(0)
 
     with torch.no_grad():
@@ -105,14 +106,14 @@ def test_gdn_attention_adapter_grafts_and_reloads_in_tiny_model(tmp_path):
             use_cache=False,
         )
         model_output_before_reload = model(
-            input_ids=input_ids, attention_mask=torch.ones_like(input_ids), use_cache=False
+            input_ids=input_ids, attention_mask=input_mask, use_cache=False
         ).last_hidden_state
 
     assert isinstance(attention_result, tuple) and attention_result[1] is None
     assert attention_result[0].shape == hidden.shape
     assert output_before_reload.shape == hidden.shape
     assert torch.isfinite(output_before_reload).all()
-    assert model_output_before_reload.shape == hidden.shape
+    assert model_output_before_reload.shape == (2, 4, config.hidden_size)
     assert torch.isfinite(model_output_before_reload).all()
     assert layer.mlp is original_mlp
     assert layer.input_layernorm is original_input_norm
@@ -137,7 +138,7 @@ def test_gdn_attention_adapter_grafts_and_reloads_in_tiny_model(tmp_path):
             use_cache=False,
         )
         model_output_after_reload = model(
-            input_ids=input_ids, attention_mask=torch.ones_like(input_ids), use_cache=False
+            input_ids=input_ids, attention_mask=input_mask, use_cache=False
         ).last_hidden_state
 
     torch.testing.assert_close(output_before_reload, output_after_reload)
@@ -147,7 +148,7 @@ def test_gdn_attention_adapter_grafts_and_reloads_in_tiny_model(tmp_path):
             torch.testing.assert_close(outer_state[name], tensor)
 
 
-def test_gdn_attention_adapter_fails_closed_on_cache_and_causal_masks():
+def test_gdn_attention_adapter_fails_closed_on_cache_and_nonstandard_masks():
     config = SimpleNamespace(
         model_type="qwen3_moe",
         hidden_size=64,
@@ -163,8 +164,18 @@ def test_gdn_attention_adapter_fails_closed_on_cache_and_causal_masks():
 
     with pytest.raises(NotImplementedError, match="cache"):
         adapter(hidden, use_cache=True)
-    with pytest.raises(NotImplementedError, match="2-D padding mask"):
-        adapter(hidden, attention_mask=torch.zeros(1, 1, 3, 3))
+
+    prepared_mask = torch.tensor(
+        [[[[True, False, False], [True, True, False], [True, True, False]]]]
+    )
+    mapped_mask = adapter._padding_mask(hidden, prepared_mask)
+    assert torch.equal(mapped_mask, torch.tensor([[True, True, False]]))
+    additive_mask = torch.where(
+        prepared_mask, torch.tensor(0.0), torch.tensor(torch.finfo(torch.float32).min)
+    )
+    assert torch.equal(adapter._padding_mask(hidden, additive_mask), mapped_mask)
+    with pytest.raises(NotImplementedError, match="standard causal masks"):
+        adapter(hidden, attention_mask=torch.ones(1, 1, 3, 3, dtype=torch.bool))
 
     output, weights = adapter(hidden, attention_mask=torch.tensor([[1, 1, 0]]))
     assert output.shape == hidden.shape

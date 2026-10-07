@@ -90,14 +90,48 @@ def make_gdn(base_config: Any, layer_idx: int, *, key_heads: int | None = None, 
 class GDNQwen3MoeAttentionAdapter(nn.Module):
     """Expose GDN through Qwen3-MoE's attention tuple interface, without caching.
 
-    This pilot adapter accepts no mask or a 2-D binary padding mask. Mapping
-    Qwen's prepared causal masks and the Qwen KV cache to GDN state is not yet
-    implemented, so those paths fail explicitly instead of silently misbehaving.
+    Supports no mask, a 2-D binary padding mask, or Qwen3-MoE's standard
+    4-D causal mask combined with binary key padding. Hybrid cache state and
+    nonstandard/sparse masks remain unsupported and fail explicitly.
     """
 
     def __init__(self, gdn: nn.Module) -> None:
         super().__init__()
         self.gdn = gdn
+
+    @staticmethod
+    def _padding_mask(
+        hidden_states: torch.Tensor, attention_mask: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if attention_mask is None:
+            return None
+        batch_size, sequence_length = hidden_states.shape[:2]
+        attention_mask = attention_mask.to(device=hidden_states.device)
+        if attention_mask.ndim == 2 and tuple(attention_mask.shape) == (batch_size, sequence_length):
+            return attention_mask.to(dtype=torch.bool)
+        if (
+            attention_mask.ndim != 4
+            or attention_mask.shape[0] != batch_size
+            or attention_mask.shape[1] != 1
+            or tuple(attention_mask.shape[-2:]) != (sequence_length, sequence_length)
+        ):
+            raise NotImplementedError("unsupported attention mask shape for no-cache GDN adapter")
+        if attention_mask.dtype == torch.bool:
+            allowed = attention_mask
+        elif attention_mask.is_floating_point():
+            allowed = attention_mask == 0
+        else:
+            raise NotImplementedError("4-D attention masks must be boolean or additive floating point")
+
+        key_valid = allowed.any(dim=-2).squeeze(1)
+        query_valid = allowed.any(dim=-1).squeeze(1)
+        causal = torch.ones(
+            (sequence_length, sequence_length), device=hidden_states.device, dtype=torch.bool
+        ).tril()
+        expected = causal[None, None, :, :] & query_valid[:, None, :, None] & key_valid[:, None, None, :]
+        if not torch.equal(allowed, expected):
+            raise NotImplementedError("only standard causal masks with binary padding are supported")
+        return key_valid
 
     def forward(
         self,
@@ -111,11 +145,5 @@ class GDNQwen3MoeAttentionAdapter(nn.Module):
             raise NotImplementedError("hybrid Qwen3-MoE/GDN cache support is not implemented")
         if kwargs.get("output_attentions", False):
             raise NotImplementedError("GDN does not provide attention weights")
-        if attention_mask is not None:
-            expected_shape = tuple(hidden_states.shape[:2])
-            if attention_mask.ndim != 2 or tuple(attention_mask.shape) != expected_shape:
-                raise NotImplementedError(
-                    "GDN adapter accepts only a 2-D padding mask; prepared causal masks need explicit mapping"
-                )
-            attention_mask = attention_mask.to(device=hidden_states.device, dtype=torch.bool)
-        return self.gdn(hidden_states, attention_mask=attention_mask), None
+        padding_mask = self._padding_mask(hidden_states, attention_mask)
+        return self.gdn(hidden_states, attention_mask=padding_mask), None
