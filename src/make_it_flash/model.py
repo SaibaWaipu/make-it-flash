@@ -85,3 +85,37 @@ def make_gdn(base_config: Any, layer_idx: int, *, key_heads: int | None = None, 
     # Qwen3.8-Flash-Next separates the GDN output gate from the SiLU conv activation.
     gdn.norm = _SigmoidRMSNormGated(gdn.head_v_dim, eps=gdn.layer_norm_epsilon)
     return gdn
+
+
+class GDNQwen3MoeAttentionAdapter(nn.Module):
+    """Expose GDN through Qwen3-MoE's attention tuple interface, without caching.
+
+    This pilot adapter accepts no mask or a 2-D binary padding mask. Mapping
+    Qwen's prepared causal masks and the Qwen KV cache to GDN state is not yet
+    implemented, so those paths fail explicitly instead of silently misbehaving.
+    """
+
+    def __init__(self, gdn: nn.Module) -> None:
+        super().__init__()
+        self.gdn = gdn
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Any | None = None,
+        use_cache: bool | None = False,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, None]:
+        if use_cache or past_key_values is not None:
+            raise NotImplementedError("hybrid Qwen3-MoE/GDN cache support is not implemented")
+        if kwargs.get("output_attentions", False):
+            raise NotImplementedError("GDN does not provide attention weights")
+        if attention_mask is not None:
+            expected_shape = tuple(hidden_states.shape[:2])
+            if attention_mask.ndim != 2 or tuple(attention_mask.shape) != expected_shape:
+                raise NotImplementedError(
+                    "GDN adapter accepts only a 2-D padding mask; prepared causal masks need explicit mapping"
+                )
+            attention_mask = attention_mask.to(device=hidden_states.device, dtype=torch.bool)
+        return self.gdn(hidden_states, attention_mask=attention_mask), None
