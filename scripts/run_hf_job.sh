@@ -98,7 +98,7 @@ hf jobs run --detach \
   --env "MIF_LAYER=$MIF_LAYER" \
   --env "MIF_MODEL=$MIF_MODEL" \
   --env "MIF_MODEL_REVISION=$MIF_MODEL_REVISION" \
-  "$HF_JOB_IMAGE" bash -lc 'set -euo pipefail
+  "$HF_JOB_IMAGE" bash -c 'set -euo pipefail
   git clone --depth 1 --branch "$MIF_GIT_REF" "$MIF_GIT_URL" /workspace/make_it_flash
   cd /workspace/make_it_flash
   source_commit="$(git rev-parse HEAD)"
