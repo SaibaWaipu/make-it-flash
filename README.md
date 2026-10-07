@@ -74,7 +74,7 @@ Teacher cache と fitting (十分な GPU がある場合のみ):
       --epochs 3 \
       --max-steps 200
 
-QSAのselector学習では、dense teacher attentionをGPU上で計算した後、micro-block massだけを圧縮保存します（dense行列計算のため一度に1層のみ）。既定budgetは2048 tokens、compression ratioは4なので、実際のtop-k pruningを学習データで観察するには少なくとも2052 token長の系列が必要です。例えば `--max-seq-len 4096` でprepareします。2048以下でもscore surrogateは学習できますが、pruning自体は起こらず、metricsに警告が記録されます。
+QSAのselector学習では、dense teacher attentionをGPU上で計算した後、micro-block massだけを圧縮保存します（dense行列計算のため一度に1層のみ）。既定budgetは2048 tokens、compression ratioは4なので、top-k pruningが起きる最短系列長は2052 tokensです。Assemblyには十分な長さのtrain例と独立validation例の両方が必要です。`cache --attention-layers` はGPU確認/teacher weight load前にeligible系列が2本未満なら失敗し、`fit-qsa` はtrain/独立validation双方の条件不足時にoptimizer開始前に失敗します。例えば `--max-seq-len 4096` でprepareし、train/validation双方に実際に長い例が分割されるだけのtoken数を用意してください。
 
     make-it-flash prepare \
       --output-dir artifacts/qsa-data \
@@ -92,7 +92,7 @@ QSAのselector学習では、dense teacher attentionをGPU上で計算した後�
       --output-dir artifacts/qsa \
       --layer 3
 
-QSA fitは1層のみの局所fitです。実際のteacher cache取得にはGPUが必要ですが、このREADME更新では有料Jobを実行していません。
+QSA fitは1層のみの局所fitです。長い独立train/validation例がない場合は学習開始前に拒否します。実際のteacher cache取得にはGPUが必要ですが、このREADME更新では有料Jobを実行していません。
 
 prepare の出力 mix が目標に達しない場合は data_manifest.json の actual_tokens_by_category と skipped_rows_by_config を確認してください。上書きには各 stage の --overwrite を明示します。
 
@@ -154,7 +154,7 @@ Launchは個別の明示承認後に限ります。実行時には per-job 上�
 
 ## Validation status
 
-ローカル pytest は56件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validation・QSA pruning実例・checkpoint hash/runtime fingerprintも検証します。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+ローカル pytest は60件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cacheは短いQSA dataならteacher load前に、fit-qsaは独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
 
 2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 

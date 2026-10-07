@@ -23,6 +23,36 @@ def _read_jsonl(path: Path):
                 raise ValueError(f"invalid JSON at {path}:{line_number}") from exc
 
 
+QSA_TOKEN_BUDGET = 2048
+QSA_COMPRESS_RATIO = 4
+
+
+def _count_qsa_pruning_candidates(
+    data_file: str | Path,
+    *,
+    max_examples: int | None,
+) -> dict[str, int]:
+    required_length = (QSA_TOKEN_BUDGET // QSA_COMPRESS_RATIO + 1) * QSA_COMPRESS_RATIO
+    examples = pruning_examples = max_sequence_length = 0
+    for row in _read_jsonl(Path(data_file)):
+        ids = row.get("input_ids")
+        if not isinstance(ids, list) or not ids:
+            continue
+        examples += 1
+        sequence_length = len(ids)
+        max_sequence_length = max(max_sequence_length, sequence_length)
+        if sequence_length >= required_length:
+            pruning_examples += 1
+        if max_examples is not None and examples >= max_examples:
+            break
+    return {
+        "required_sequence_length": required_length,
+        "examples_scanned": examples,
+        "pruning_examples": pruning_examples,
+        "max_sequence_length": max_sequence_length,
+    }
+
+
 def _check_gpu_memory(min_free_gib: float) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -164,26 +194,37 @@ def cache_teacher_outputs(
     data_manifest = json.loads(data_manifest_path.read_text(encoding="utf-8"))
     model_id = data_manifest["model_id"]
     revision = data_manifest.get("model_revision", "main")
-
-    target_dir = Path(output_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    marker = target_dir / "cache_manifest.json"
-    if not overwrite and (marker.exists() or any(target_dir.glob("*.safetensors"))):
-        raise FileExistsError(f"cache output already exists under {target_dir}; pass --overwrite")
-
-    _check_gpu_memory(min_free_gib)
-    config = AutoConfig.from_pretrained(model_id, revision=revision, trust_remote_code=False)
-    if getattr(config, "model_type", None) != "qwen3_moe":
-        raise ValueError(f"expected a qwen3_moe base model, got {getattr(config, 'model_type', None)!r}")
-    layer_count = int(config.num_hidden_layers)
     selected = tuple(sorted(set(int(index) for index in layers)))
     attention_selected = tuple(sorted(set(int(index) for index in attention_layers)))
-    if not selected or min(selected) < 0 or max(selected) >= layer_count:
-        raise ValueError(f"layer indices must be in [0, {layer_count - 1}]")
+    if not selected:
+        raise ValueError("layers must not be empty")
     if not set(attention_selected).issubset(selected):
         raise ValueError("attention_layers must be included in layers")
     if len(attention_selected) > 1:
         raise ValueError("capture one dense teacher attention layer at a time to bound memory")
+    if attention_selected:
+        pruning_evidence = _count_qsa_pruning_candidates(source_path, max_examples=max_examples)
+        if pruning_evidence["pruning_examples"] < 2:
+            raise ValueError(
+                f"QSA teacher capture needs at least two sequences of "
+                f"{pruning_evidence['required_sequence_length']} tokens for separate train/validation pruning; "
+                f"found {pruning_evidence['pruning_examples']} qualifying examples "
+                f"(max length {pruning_evidence['max_sequence_length']}). Prepare longer/more data before loading weights."
+            )
+
+    target_dir = Path(output_dir)
+    marker = target_dir / "cache_manifest.json"
+    if not overwrite and (marker.exists() or any(target_dir.glob("*.safetensors"))):
+        raise FileExistsError(f"cache output already exists under {target_dir}; pass --overwrite")
+
+    config = AutoConfig.from_pretrained(model_id, revision=revision, trust_remote_code=False)
+    if getattr(config, "model_type", None) != "qwen3_moe":
+        raise ValueError(f"expected a qwen3_moe base model, got {getattr(config, 'model_type', None)!r}")
+    layer_count = int(config.num_hidden_layers)
+    if min(selected) < 0 or max(selected) >= layer_count:
+        raise ValueError(f"layer indices must be in [0, {layer_count - 1}]")
+    _check_gpu_memory(min_free_gib)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -271,8 +312,8 @@ def cache_teacher_outputs(
         "rope_theta": 10_000_000.0,
         "index_n_heads": 4,
         "index_head_dim": 128,
-        "token_budget": 2048,
-        "compress_ratio": 4,
+        "token_budget": QSA_TOKEN_BUDGET,
+        "compress_ratio": QSA_COMPRESS_RATIO,
     }
     manifest = {
         "model_id": model_id,

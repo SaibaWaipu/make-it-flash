@@ -1,8 +1,11 @@
+import json
+
 import torch
 import pytest
-from transformers import Qwen3MoeConfig
+from transformers import AutoConfig, Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
+import make_it_flash.cache as cache_module
 from make_it_flash.cache import _capture_local_attention
 
 
@@ -56,3 +59,39 @@ def test_selective_attention_capture_requires_selected_layer_subset():
     model = _tiny_model()
     with pytest.raises(ValueError, match="subset"):
         _capture_local_attention(model, torch.tensor([[1, 2]]), (0,), (1,))
+
+
+def test_qsa_cache_preflight_rejects_short_data_before_gpu_or_model_load(tmp_path, monkeypatch):
+    data_file = tmp_path / "calibration.jsonl"
+    data_file.write_text(
+        json.dumps({"sample_id": "short-1", "input_ids": [1, 2, 3]})
+        + "\n"
+        + json.dumps({"sample_id": "short-2", "input_ids": [4, 5, 6]})
+        + "\n",
+        encoding="utf-8",
+    )
+    data_file.with_name("data_manifest.json").write_text(
+        json.dumps({"model_id": "fixture/model", "model_revision": "fixture-sha"}),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "qsa-cache"
+    monkeypatch.setattr(
+        AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: pytest.fail("QSA length preflight must happen before config/model loading"),
+    )
+    monkeypatch.setattr(
+        cache_module,
+        "_check_gpu_memory",
+        lambda *_: pytest.fail("QSA length preflight must happen before GPU checks"),
+    )
+
+    with pytest.raises(ValueError, match="needs at least two sequences of 2052 tokens"):
+        cache_module.cache_teacher_outputs(
+            data_file=data_file,
+            output_dir=output_dir,
+            layers=(3,),
+            attention_layers=(3,),
+        )
+
+    assert not output_dir.exists()

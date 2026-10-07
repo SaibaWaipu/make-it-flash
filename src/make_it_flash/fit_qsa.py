@@ -134,7 +134,6 @@ def fit_qsa_layer(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_path / f"qsa_layer_{layer:02d}.safetensors"
     metrics_path = output_path / f"fit_qsa_layer_{layer:02d}.json"
     if not overwrite and (checkpoint_path.exists() or metrics_path.exists()):
@@ -177,6 +176,21 @@ def fit_qsa_layer(
     selector_pruning_validation_examples = sum(
         length >= pruning_threshold for length in validation_sequence_lengths
     )
+    if selector_pruning_examples == 0:
+        raise ValueError(
+            f"no QSA training sequence reaches {pruning_threshold} tokens required for top-k pruning; "
+            "increase prepare --max-seq-len and recache"
+        )
+    if validation_uses_train_fallback:
+        raise ValueError(
+            "no independent QSA validation examples are available; collect more calibration data and recache"
+        )
+    if selector_pruning_validation_examples == 0:
+        raise ValueError(
+            f"no independent QSA validation sequence reaches {pruning_threshold} tokens required for top-k pruning; "
+            "increase prepare --max-seq-len or collect more long validation examples"
+        )
+    output_path.mkdir(parents=True, exist_ok=True)
 
     base = SimpleNamespace(**manifest["base_config"])
     torch.manual_seed(seed)
