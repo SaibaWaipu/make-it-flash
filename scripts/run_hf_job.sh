@@ -82,7 +82,7 @@ fi
 hf jobs run --detach \
   --label "name=$MIF_JOB_NAME" \
   --label "purpose=llm-jp-41-gdn-pilot" \
-  --label "approved_budget_usd=$MIF_APPROVED_BUDGET_USD" \
+  --label "cost_guarded=true" \
   --flavor "$HF_FLAVOR" \
   --timeout "$HF_TIMEOUT" \
   --secrets HF_TOKEN \

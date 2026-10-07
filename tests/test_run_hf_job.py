@@ -10,7 +10,19 @@ set -euo pipefail
 if [[ "$1 $2 $3" == "jobs hardware --json" ]]; then
   printf '%s\\n' '[{"name":"a100-large","cost/hour":"$2.50"}]'
 elif [[ "$1 $2" == "jobs run" ]]; then
-  printf 'MOCK_HF_JOBS_RUN %s\\n' "$*"
+  arguments="$*"
+  shift 2
+  while (($#)); do
+    if [[ "$1" == "--label" ]]; then
+      shift
+      if [[ ! "$1" =~ ^[a-zA-Z0-9_-]+=[a-zA-Z0-9_-]+$ ]]; then
+        echo "invalid mock label: $1" >&2
+        exit 98
+      fi
+    fi
+    shift
+  done
+  printf 'MOCK_HF_JOBS_RUN %s\\n' "$arguments"
 else
   echo "unexpected fake hf command: $*" >&2
   exit 99
