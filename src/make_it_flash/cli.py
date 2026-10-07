@@ -76,6 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--qsa-dir", type=Path, required=True)
     assemble.add_argument("--output-dir", type=Path, default=Path("artifacts/flash_next_overlay"))
     assemble.add_argument("--overwrite", action="store_true")
+
+    evaluate = commands.add_parser("evaluate", help="compare base/hybrid token-level perplexity on held-out data")
+    evaluate.add_argument("--model", default=DEFAULT_MODEL)
+    evaluate.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)
+    evaluate.add_argument("--data-file", type=Path, required=True)
+    evaluate.add_argument("--overlay-dir", type=Path, required=True)
+    evaluate.add_argument("--output-file", type=Path, default=Path("artifacts/evaluation/report.json"))
+    evaluate.add_argument("--max-examples", type=int)
+    evaluate.add_argument("--target-chunk-tokens", type=int, default=64)
+    evaluate.add_argument("--min-free-gib", type=float, default=66.0)
+    evaluate.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -142,6 +153,20 @@ def main(argv: list[str] | None = None) -> int:
             validation_fraction=args.validation_fraction,
             seed=args.seed,
             allow_cpu=args.allow_cpu,
+            overwrite=args.overwrite,
+        )
+    elif args.command == "evaluate":
+        from .evaluation import evaluate_flash_next
+
+        result = evaluate_flash_next(
+            data_file=args.data_file,
+            overlay_dir=args.overlay_dir,
+            output_file=args.output_file,
+            base_model_id=args.model,
+            base_model_revision=args.model_revision,
+            max_examples=args.max_examples,
+            target_chunk_tokens=args.target_chunk_tokens,
+            min_free_gib=args.min_free_gib,
             overwrite=args.overwrite,
         )
     else:
