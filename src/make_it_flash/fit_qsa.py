@@ -16,7 +16,12 @@ from safetensors.torch import save_file
 
 from .fit import _split_value
 from .model import make_qsa
-from .provenance import checkpoint_provenance, sha256_file, validate_cache_sample_metadata
+from .provenance import (
+    checkpoint_provenance,
+    sha256_file,
+    validate_cache_sample_metadata,
+    validate_calibration_data_provenance,
+)
 
 
 def _qsa_sample(
@@ -109,6 +114,7 @@ def fit_qsa_layer(
     if not manifest_path.is_file():
         raise FileNotFoundError(f"missing {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    calibration_data = validate_calibration_data_provenance(manifest.get("calibration_data"))
     if layer not in manifest.get("layers", []):
         raise ValueError(f"layer {layer} was not included in cache; cached layers={manifest.get('layers', [])}")
     if layer not in manifest.get("attention_layers", []):
@@ -154,6 +160,7 @@ def fit_qsa_layer(
             path=path,
             model_id=str(manifest["model_id"]),
             model_revision=str(manifest["model_revision"]),
+            calibration_data=calibration_data,
         )
         if f"layer_{layer:02d}_block_mass" not in keys:
             continue
@@ -267,6 +274,7 @@ def fit_qsa_layer(
             "teacher_layer": str(layer),
             "module": "make_it_flash.QSAQwen3MoeAttentionAdapter",
             "qsa_config": json.dumps(qsa_config, sort_keys=True),
+            "calibration_data": json.dumps(calibration_data, sort_keys=True),
             **checkpoint_provenance(),
         },
     )
@@ -274,6 +282,7 @@ def fit_qsa_layer(
     metrics = {
         "model_id": manifest["model_id"],
         "model_revision": manifest["model_revision"],
+        "calibration_data": calibration_data,
         "teacher_layer": layer,
         "num_train_sequences": len(train_paths),
         "num_validation_sequences": len(validation_paths),

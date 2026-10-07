@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,11 @@ import torch
 from safetensors.torch import save_file
 
 from .model import get_decoder_layers, make_gdn_config
-from .provenance import validate_base_config_provenance, validate_model_revision
+from .provenance import (
+    sha256_file,
+    validate_base_config_provenance,
+    validate_model_revision,
+)
 
 
 def _read_jsonl(path: Path):
@@ -199,7 +204,12 @@ def cache_teacher_outputs(
     data_manifest_path = source_path.with_name("data_manifest.json")
     if not source_path.is_file() or not data_manifest_path.is_file():
         raise FileNotFoundError("data_file and its adjacent data_manifest.json are required")
-    data_manifest = json.loads(data_manifest_path.read_text(encoding="utf-8"))
+    data_manifest_bytes = data_manifest_path.read_bytes()
+    data_manifest = json.loads(data_manifest_bytes.decode("utf-8"))
+    data_manifest_sha256 = hashlib.sha256(data_manifest_bytes).hexdigest()
+    declared_data_file = data_manifest.get("data_file")
+    if declared_data_file is not None and declared_data_file != source_path.name:
+        raise ValueError("data_manifest.json data_file does not match the requested calibration JSONL")
     model_id = data_manifest["model_id"]
     revision = data_manifest.get("model_revision", "main")
     validate_model_revision(revision)
@@ -211,6 +221,16 @@ def cache_teacher_outputs(
         raise ValueError("attention_layers must be included in layers")
     if len(attention_selected) > 1:
         raise ValueError("capture one dense teacher attention layer at a time to bound memory")
+    calibration_data = {
+        "data_sha256": sha256_file(source_path),
+        "manifest_sha256": data_manifest_sha256,
+        "dataset_id": data_manifest.get("dataset_id"),
+        "dataset_revision": data_manifest.get("dataset_revision"),
+        "split": data_manifest.get("split"),
+        "seed": data_manifest.get("seed"),
+        "target_tokens": data_manifest.get("target_tokens"),
+        "actual_tokens": data_manifest.get("actual_tokens"),
+    }
     if attention_selected:
         pruning_evidence = _count_qsa_pruning_candidates(source_path, max_examples=max_examples)
         if pruning_evidence["pruning_examples"] < 2:
@@ -220,6 +240,11 @@ def cache_teacher_outputs(
                 f"found {pruning_evidence['pruning_examples']} qualifying examples "
                 f"(max length {pruning_evidence['max_sequence_length']}). Prepare longer/more data before loading weights."
             )
+    if (
+        sha256_file(source_path) != calibration_data["data_sha256"]
+        or sha256_file(data_manifest_path) != calibration_data["manifest_sha256"]
+    ):
+        raise RuntimeError("calibration data changed during QSA preflight; refusing to continue")
 
     target_dir = Path(output_dir)
     marker = target_dir / "cache_manifest.json"
@@ -289,6 +314,8 @@ def cache_teacher_outputs(
                     "config": str(row.get("config", "unknown")),
                     "model_id": model_id,
                     "model_revision": revision,
+                    "calibration_data_sha256": calibration_data["data_sha256"],
+                    "data_manifest_sha256": calibration_data["manifest_sha256"],
                 }
                 save_file(tensors, str(target_dir / f"sample_{emitted:06d}.safetensors"), metadata=metadata)
                 emitted += 1
@@ -299,6 +326,11 @@ def cache_teacher_outputs(
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    if (
+        sha256_file(source_path) != calibration_data["data_sha256"]
+        or sha256_file(data_manifest_path) != calibration_data["manifest_sha256"]
+    ):
+        raise RuntimeError("calibration data or data manifest changed during teacher capture; refusing to publish")
     if emitted == 0:
         raise ValueError("teacher cache capture produced no usable examples; refusing to publish an empty cache")
 
@@ -334,6 +366,7 @@ def cache_teacher_outputs(
         "model_id": model_id,
         "model_revision": revision,
         "data_file": str(source_path),
+        "calibration_data": calibration_data,
         "layers": list(selected),
         "attention_layers": list(attention_selected),
         "num_examples": emitted,

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import torch
 import pytest
+from safetensors import safe_open
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
@@ -179,6 +180,82 @@ def test_cache_rejects_unverified_config_before_gpu_or_weight_load(
     with pytest.raises(ValueError, match=message):
         cache_module.cache_teacher_outputs(data_file=data_file, output_dir=output_dir, layers=(0,))
     assert not output_dir.exists()
+
+
+def test_cache_manifest_binds_calibration_data_and_dataset_revision(tmp_path, monkeypatch):
+    data_file = tmp_path / "calibration.jsonl"
+    data_file.write_text(json.dumps({"sample_id": "jp-1", "input_ids": [4, 5]}) + "\n", encoding="utf-8")
+    data_manifest = {
+        "model_id": "fixture/model",
+        "model_revision": "a" * 40,
+        "dataset_id": "fixture/japanese-sft",
+        "dataset_revision": "b" * 40,
+        "split": "reasoning_medium",
+        "seed": 17,
+        "target_tokens": 2,
+        "actual_tokens": 2,
+        "data_file": data_file.name,
+    }
+    data_manifest_path = data_file.with_name("data_manifest.json")
+    data_manifest_path.write_text(json.dumps(data_manifest), encoding="utf-8")
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=32,
+    )
+    config._name_or_path = "fixture/model"
+    config._commit_hash = "a" * 40
+
+    class FakeTeacher:
+        def __init__(self):
+            self.config = config
+            self.layers = [SimpleNamespace(self_attn=torch.nn.Linear(64, 64))]
+            self.embedding = torch.nn.Embedding(64, 64)
+
+        def eval(self):
+            return self
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", lambda *args, **kwargs: FakeTeacher())
+    monkeypatch.setattr(cache_module, "_check_gpu_memory", lambda *_: None)
+    monkeypatch.setattr(
+        cache_module,
+        "_capture_local_attention",
+        lambda *_args, **_kwargs: {
+            0: {
+                "input": torch.ones(2, 64, dtype=torch.bfloat16),
+                "target": torch.zeros(2, 64, dtype=torch.bfloat16),
+            }
+        },
+    )
+
+    output_dir = tmp_path / "cache"
+    manifest = cache_module.cache_teacher_outputs(
+        data_file=data_file,
+        output_dir=output_dir,
+        layers=(0,),
+        min_free_gib=0,
+    )
+
+    calibration_data = manifest["calibration_data"]
+    assert calibration_data["data_sha256"] == cache_module.sha256_file(data_file)
+    assert calibration_data["manifest_sha256"] == cache_module.sha256_file(data_manifest_path)
+    assert calibration_data["dataset_id"] == "fixture/japanese-sft"
+    assert calibration_data["dataset_revision"] == "b" * 40
+    with safe_open(str(output_dir / "sample_000000.safetensors"), framework="pt", device="cpu") as handle:
+        sample_metadata = handle.metadata()
+    assert sample_metadata["calibration_data_sha256"] == calibration_data["data_sha256"]
+    assert sample_metadata["data_manifest_sha256"] == calibration_data["manifest_sha256"]
 
 
 def test_failed_cache_overwrite_invalidates_old_manifest(tmp_path, monkeypatch):

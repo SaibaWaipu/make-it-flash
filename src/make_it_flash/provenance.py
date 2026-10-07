@@ -37,12 +37,23 @@ def validate_base_config_provenance(config, model_id: str, revision: str) -> Non
         )
 
 
+def validate_calibration_data_provenance(value: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("cache manifest lacks calibration-data provenance")
+    for field in ("data_sha256", "manifest_sha256"):
+        digest = value.get(field)
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(f"calibration-data provenance has an invalid {field}")
+    return dict(value)
+
+
 def validate_cache_sample_metadata(
     metadata: dict[str, str] | None,
     *,
     path: str | Path,
     model_id: str,
     model_revision: str,
+    calibration_data: dict[str, object],
 ) -> None:
     if not isinstance(metadata, dict):
         raise ValueError(f"cache shard {Path(path).name} has no provenance metadata")
@@ -52,6 +63,12 @@ def validate_cache_sample_metadata(
         )
     if not isinstance(metadata.get("sample_id"), str) or not metadata["sample_id"]:
         raise ValueError(f"cache shard {Path(path).name} has no sample_id provenance")
+    expected_data = validate_calibration_data_provenance(calibration_data)
+    if (
+        metadata.get("calibration_data_sha256") != expected_data["data_sha256"]
+        or metadata.get("data_manifest_sha256") != expected_data["manifest_sha256"]
+    ):
+        raise ValueError(f"cache shard {Path(path).name} calibration provenance does not match cache manifest")
 
 
 def _implementation_fingerprint() -> str:

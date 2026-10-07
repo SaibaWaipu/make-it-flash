@@ -26,6 +26,7 @@ from .provenance import (
     checkpoint_provenance,
     sha256_file,
     validate_base_config_provenance,
+    validate_calibration_data_provenance,
     validate_model_revision,
 )
 
@@ -78,7 +79,7 @@ def _read_checkpoint_metadata(path: Path) -> dict[str, str]:
         raise FileNotFoundError(f"missing fitted layer checkpoint: {path}")
     with safe_open(str(path), framework="pt", device="cpu") as handle:
         metadata = handle.metadata() or {}
-    required = {"model_id", "model_revision", "teacher_layer", "module", *_PROVENANCE_FIELDS}
+    required = {"model_id", "model_revision", "teacher_layer", "module", "calibration_data", *_PROVENANCE_FIELDS}
     missing = required - metadata.keys()
     if missing:
         raise ValueError(f"{path.name} lacks checkpoint metadata: {sorted(missing)}")
@@ -121,6 +122,7 @@ def _validate_fit_metrics(
         or metrics.get("teacher_layer") != layer
     ):
         raise ValueError(f"fit metrics identity does not match base layer {layer}")
+    calibration_data = validate_calibration_data_provenance(metrics.get("calibration_data"))
     if (
         metrics.get("checkpoint") != checkpoint_path.name
         or metrics.get("checkpoint_sha256") != sha256_file(checkpoint_path)
@@ -180,6 +182,7 @@ def _validate_fit_metrics(
         raise ValueError(f"layer {layer} validation loss did not improve; refusing untrained/degraded overlay")
     result = {
         "metrics_file": metrics_path.name,
+        "calibration_data": calibration_data,
         "steps": int(metrics["steps"]),
         "num_train_sequences": int(metrics["num_train_sequences"]),
         "num_validation_sequences": int(metrics["num_validation_sequences"]),
@@ -266,6 +269,7 @@ def assemble_flash_next_overlay(
     }
     runtime_provenance = checkpoint_provenance()
     observed_provenance: dict[str, str] | None = None
+    observed_calibration_data: dict[str, Any] | None = None
     for kind, indices, source_root, config_key in (
         ("gdn", gdn_layers, gdn_root, "gdn_config"),
         ("qsa", qsa_layers, qsa_root, "qsa_config"),
@@ -295,7 +299,10 @@ def assemble_flash_next_overlay(
                 gdn_config = current_config
             else:
                 qsa_config = current_config
-            fit_validation[kind][str(index)] = _validate_fit_metrics(
+            checkpoint_calibration_data = validate_calibration_data_provenance(
+                _read_json_metadata(metadata, "calibration_data", checkpoint)
+            )
+            fit_record = _validate_fit_metrics(
                 kind=kind,
                 fit_dir=source_root,
                 checkpoint_path=checkpoint,
@@ -303,6 +310,13 @@ def assemble_flash_next_overlay(
                 base_model_id=base_model_id,
                 base_model_revision=base_model_revision,
             )
+            if fit_record["calibration_data"] != checkpoint_calibration_data:
+                raise ValueError(f"{checkpoint.name} calibration provenance differs from fit metrics")
+            if observed_calibration_data is not None and checkpoint_calibration_data != observed_calibration_data:
+                raise ValueError("fit layers were trained on different calibration data")
+            observed_calibration_data = checkpoint_calibration_data
+            fit_record.pop("calibration_data")
+            fit_validation[kind][str(index)] = fit_record
             source_files[kind][index] = checkpoint
 
     if gdn_config is None or qsa_config is None:
@@ -344,6 +358,7 @@ def assemble_flash_next_overlay(
             "format_version": OVERLAY_VERSION,
             "base_model_id": base_model_id,
             "base_model_revision": base_model_revision,
+            "calibration_data": observed_calibration_data,
             "provenance": runtime_provenance,
             "base_config": base_fields,
             "schedule": {"gdn_layers": list(gdn_layers), "qsa_layers": list(qsa_layers)},

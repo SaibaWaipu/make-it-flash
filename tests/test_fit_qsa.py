@@ -10,6 +10,14 @@ from make_it_flash.fit_qsa import fit_qsa_layer
 from make_it_flash.provenance import checkpoint_provenance, sha256_file
 
 
+CALIBRATION_DATA = {
+    "data_sha256": "a" * 64,
+    "manifest_sha256": "b" * 64,
+    "dataset_id": "fixture/dataset",
+    "dataset_revision": "c" * 40,
+    "split": "fixture",
+}
+
 QSA_CONFIG = {
     "num_heads": 4,
     "num_key_value_heads": 2,
@@ -37,6 +45,8 @@ def _write_qsa_cache_example(cache_dir: Path, index: int, seq_len: int):
             "config": "fixture",
             "model_id": "fixture/model",
             "model_revision": "fixture",
+            "calibration_data_sha256": CALIBRATION_DATA["data_sha256"],
+            "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
         },
     )
 
@@ -49,6 +59,7 @@ def test_fit_qsa_layer_writes_standalone_checkpoint_from_teacher_maps(tmp_path: 
     manifest = {
         "model_id": "fixture/qwen3-moe",
         "model_revision": "fixture-sha",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [0],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
@@ -75,6 +86,8 @@ def test_fit_qsa_layer_writes_standalone_checkpoint_from_teacher_maps(tmp_path: 
                 "config": "fixture",
                 "model_id": "fixture/qwen3-moe",
                 "model_revision": "fixture-sha",
+                "calibration_data_sha256": CALIBRATION_DATA["data_sha256"],
+                "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
             },
         )
 
@@ -115,6 +128,7 @@ def test_fit_qsa_preflights_training_sequence_pruning_length(tmp_path: Path):
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [0],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
@@ -143,6 +157,7 @@ def test_fit_qsa_preflights_independent_validation_pruning_length(tmp_path: Path
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [0],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
@@ -177,6 +192,7 @@ def test_fit_qsa_preflights_missing_independent_validation_split(tmp_path: Path,
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [0],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
@@ -206,6 +222,7 @@ def test_fit_qsa_rejects_cache_shard_from_different_base_revision(tmp_path: Path
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [0],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
@@ -223,6 +240,8 @@ def test_fit_qsa_rejects_cache_shard_from_different_base_revision(tmp_path: Path
             "sample_id": "stale",
             "model_id": "fixture/model",
             "model_revision": "another-revision",
+            "calibration_data_sha256": CALIBRATION_DATA["data_sha256"],
+            "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
         },
     )
 
@@ -244,6 +263,7 @@ def test_fit_qsa_requires_positive_selector_loss_weight(tmp_path: Path):
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [0],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
@@ -269,6 +289,7 @@ def test_fit_qsa_requires_teacher_attention_maps(tmp_path: Path):
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "attention_layers": [],
         "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},

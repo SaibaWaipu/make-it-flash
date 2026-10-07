@@ -110,7 +110,7 @@ configure_hybrid_cache(model, gdn_layers=[0, 3, 6])
 
 ## Base-model overlay assembly
 
-32層分の各fit成果を揃えた後、`assemble` はbase configのrepo ID/commit SHA、各fit checkpointのSHA-256、独立validationでの全体/selector loss改善、QSAのtrain/validation双方でのtop-k pruning実例、およびTransformers/package/implementation fingerprintを照合し、3-GDN/1-QSA scheduleのadapter weightsとmanifestだけを一時directoryからatomicにpublishします。LLM-jp本体のweights/tokenizerは複製せず、ロード時に同じ固定revisionのbase modelを別途指定します。
+32層分の各fit成果を揃えた後、`assemble` はbase configのrepo ID/commit SHA、各fit checkpointのSHA-256、独立validationでの全体/selector loss改善、QSAのtrain/validation双方でのtop-k pruning実例、全layer共通の校正JSONL/data manifest SHA-256、およびTransformers/package/implementation fingerprintを照合し、3-GDN/1-QSA scheduleのadapter weightsとmanifestだけを一時directoryからatomicにpublishします。LLM-jp本体のweights/tokenizerは複製せず、ロード時に同じ固定revisionのbase modelを別途指定します。
 
     make-it-flash assemble \
       --gdn-dir artifacts/gdn-all \
@@ -154,7 +154,7 @@ Launchは個別の明示承認後に限ります。実行時には per-job 上�
 
 ## Validation status
 
-ローカル pytest は67件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cacheは短いQSA dataならteacher load前に、両fittersは各shardのmodel ID/revisionがmanifestと異なる場合にfailします。fit-qsaはさらに独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+ローカル pytest は70件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cache manifestは校正JSONL・data manifestのSHA-256とdataset ID/revisionを保持し、各shard・fit checkpoint/metricsにも伝播します。assembleは全layerが同じ校正data provenanceを使った場合のみ受け入れます。cacheは短いQSA dataならteacher load前に、両fittersは各shardのmodel ID/revision/calibration hashがmanifestと異なる場合にfailします。fit-qsaはさらに独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
 
 2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 

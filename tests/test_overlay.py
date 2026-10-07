@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 
@@ -28,6 +29,13 @@ GDN_CONFIG = {
     "linear_num_key_heads": 4,
     "linear_num_value_heads": 8,
     "linear_conv_kernel_dim": 4,
+}
+CALIBRATION_DATA = {
+    "data_sha256": "1" * 64,
+    "manifest_sha256": "2" * 64,
+    "dataset_id": "fixture/dataset",
+    "dataset_revision": "3" * 40,
+    "split": "fixture",
 }
 QSA_CONFIG = {
     "num_heads": 4,
@@ -77,6 +85,7 @@ def _write_fit_artifacts(gdn_dir: Path, qsa_dir: Path):
                 "teacher_layer": str(layer),
                 "module": "transformers.models.qwen3_next.Qwen3NextGatedDeltaNet",
                 "gdn_config": json.dumps(GDN_CONFIG, sort_keys=True),
+                "calibration_data": json.dumps(CALIBRATION_DATA, sort_keys=True),
                 **checkpoint_provenance(),
             },
         )
@@ -85,6 +94,7 @@ def _write_fit_artifacts(gdn_dir: Path, qsa_dir: Path):
                 {
                     "model_id": MODEL_ID,
                     "model_revision": MODEL_REVISION,
+                    "calibration_data": CALIBRATION_DATA,
                     "teacher_layer": layer,
                     "steps": 2,
                     "num_train_sequences": 10,
@@ -110,6 +120,7 @@ def _write_fit_artifacts(gdn_dir: Path, qsa_dir: Path):
                 "teacher_layer": str(layer),
                 "module": "make_it_flash.QSAQwen3MoeAttentionAdapter",
                 "qsa_config": json.dumps(QSA_CONFIG, sort_keys=True),
+                "calibration_data": json.dumps(CALIBRATION_DATA, sort_keys=True),
                 **checkpoint_provenance(),
             },
         )
@@ -118,6 +129,7 @@ def _write_fit_artifacts(gdn_dir: Path, qsa_dir: Path):
                 {
                     "model_id": MODEL_ID,
                     "model_revision": MODEL_REVISION,
+                    "calibration_data": CALIBRATION_DATA,
                     "teacher_layer": layer,
                     "steps": 2,
                     "num_train_sequences": 10,
@@ -155,6 +167,40 @@ def _assemble(tmp_path: Path):
         output_dir=overlay_dir,
     )
     return overlay_dir, manifest
+
+
+def test_overlay_assembly_rejects_mixed_calibration_data(tmp_path):
+    gdn_dir = tmp_path / "gdn-fits"
+    qsa_dir = tmp_path / "qsa-fits"
+    overlay_dir = tmp_path / "overlay"
+    gdn_dir.mkdir()
+    qsa_dir.mkdir()
+    base_config = _write_fit_artifacts(gdn_dir, qsa_dir)
+
+    checkpoint = gdn_dir / "gdn_layer_01.safetensors"
+    tensors = load_file(str(checkpoint))
+    with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
+        metadata = handle.metadata()
+    mixed_calibration = dict(CALIBRATION_DATA)
+    mixed_calibration["data_sha256"] = "9" * 64
+    metadata["calibration_data"] = json.dumps(mixed_calibration, sort_keys=True)
+    save_file(tensors, str(checkpoint), metadata=metadata)
+    metrics_path = gdn_dir / "fit_layer_01.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics["calibration_data"] = mixed_calibration
+    metrics["checkpoint_sha256"] = sha256_file(checkpoint)
+    metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="different calibration data"):
+        assemble_flash_next_overlay(
+            base_config=base_config,
+            base_model_id=MODEL_ID,
+            base_model_revision=MODEL_REVISION,
+            gdn_fit_dir=gdn_dir,
+            qsa_fit_dir=qsa_dir,
+            output_dir=overlay_dir,
+        )
+    assert not overlay_dir.exists()
 
 
 @pytest.mark.parametrize(
