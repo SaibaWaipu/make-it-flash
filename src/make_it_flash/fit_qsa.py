@@ -16,6 +16,7 @@ from safetensors.torch import save_file
 
 from .fit import _split_value
 from .model import make_qsa
+from .provenance import checkpoint_provenance, sha256_file
 
 
 def _qsa_sample(
@@ -117,8 +118,15 @@ def fit_qsa_layer(
     token_budget = int(qsa_config.get("token_budget", 2048))
     if compress_ratio <= 0 or token_budget < compress_ratio:
         raise ValueError("qsa_config must have a positive compress_ratio and token_budget covering one block")
-    if epochs < 1 or max_steps < 1 or learning_rate <= 0 or selector_loss_weight < 0:
-        raise ValueError("epochs, max_steps, learning_rate must be positive and selector_loss_weight non-negative")
+    if (
+        epochs < 1
+        or max_steps < 1
+        or not math.isfinite(learning_rate)
+        or learning_rate <= 0
+        or not math.isfinite(selector_loss_weight)
+        or selector_loss_weight <= 0
+    ):
+        raise ValueError("epochs, max_steps, learning_rate, and selector_loss_weight must all be positive finite values")
     if not 0.0 <= validation_fraction < 0.5:
         raise ValueError("validation_fraction must be in [0, 0.5)")
     if not torch.cuda.is_available() and not allow_cpu:
@@ -214,6 +222,7 @@ def fit_qsa_layer(
 
     current_validation = _evaluate_qsa(qsa, validation_paths, layer, device, selector_loss_weight, compress_ratio)
     if math.isfinite(current_validation["total_loss"]) and current_validation["total_loss"] < best_validation_loss:
+        best_validation_loss = current_validation["total_loss"]
         best_state = {name: tensor.detach().cpu().clone() for name, tensor in qsa.state_dict().items()}
     qsa.load_state_dict(best_state)
     final_validation = _evaluate_qsa(
@@ -228,8 +237,10 @@ def fit_qsa_layer(
             "teacher_layer": str(layer),
             "module": "make_it_flash.QSAQwen3MoeAttentionAdapter",
             "qsa_config": json.dumps(qsa_config, sort_keys=True),
+            **checkpoint_provenance(),
         },
     )
+    checkpoint_sha256 = sha256_file(checkpoint_path)
     metrics = {
         "model_id": manifest["model_id"],
         "model_revision": manifest["model_revision"],
@@ -251,8 +262,10 @@ def fit_qsa_layer(
         "initial_validation": initial_validation,
         "best_validation_total_loss": best_validation_loss,
         "final_validation": final_validation,
+        "selected_checkpoint_validation_selection_loss": final_validation["selection_loss"],
         "mean_recent_train_loss": sum(recent_losses[-min(20, len(recent_losses)):]) / max(1, min(20, len(recent_losses))),
         "checkpoint": checkpoint_path.name,
+        "checkpoint_sha256": checkpoint_sha256,
         "warning": "this is a standalone fitted QSA layer, not a merged/reloadable hybrid language model checkpoint",
     }
     metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")

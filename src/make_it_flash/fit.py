@@ -16,6 +16,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .model import make_gdn
+from .provenance import checkpoint_provenance, sha256_file
 
 
 def _metadata(path: Path) -> dict[str, str]:
@@ -176,8 +177,10 @@ def fit_one_layer(
             "teacher_layer": str(layer),
             "module": "transformers.models.qwen3_next.Qwen3NextGatedDeltaNet",
             "gdn_config": json.dumps(manifest["gdn_config"], sort_keys=True),
+            **checkpoint_provenance(),
         },
     )
+    checkpoint_sha256 = sha256_file(checkpoint_path)
     metrics = {
         "model_id": manifest["model_id"],
         "model_revision": manifest["model_revision"],
@@ -195,6 +198,7 @@ def fit_one_layer(
         "final_validation_mse": final_val_loss,
         "mean_recent_train_mse": sum(losses[-min(20, len(losses)):]) / max(1, min(20, len(losses))),
         "checkpoint": checkpoint_path.name,
+        "checkpoint_sha256": checkpoint_sha256,
         "warning": "this is a standalone local GDN block, not a merged/reloadable hybrid causal LM checkpoint",
     }
     metrics_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")

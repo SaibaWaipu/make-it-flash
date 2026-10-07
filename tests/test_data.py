@@ -93,8 +93,13 @@ def test_cli_exposes_qsa_teacher_cache_and_fitting():
         ["cache", "--layers", "3", "--attention-layers", "3"]
     )
     fit_args = build_parser().parse_args(["fit-qsa", "--layer", "3"])
+    assemble_args = build_parser().parse_args(
+        ["assemble", "--gdn-dir", "artifacts/gdn", "--qsa-dir", "artifacts/qsa"]
+    )
 
     assert cache_args.attention_layers == "3"
     assert fit_args.command == "fit-qsa"
     assert fit_args.layer == 3
     assert fit_args.selector_loss_weight == 0.1
+    assert assemble_args.command == "assemble"
+    assert assemble_args.model_revision == DEFAULT_MODEL_REVISION

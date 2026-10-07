@@ -145,10 +145,21 @@ def graft_attention_modules(
                 raise ValueError(f"decoder layer {index} self_attn is offloaded/meta; materialize it before grafting")
             placements[index] = (device, original_parameters[0].dtype)
     originals = {index: layers[index].self_attn for index in replacements}
+    prepared: dict[int, nn.Module] = {}
     for index, module in replacements.items():
         if cast_to_original:
             module.to(device=placements[index][0], dtype=placements[index][1])
-        layers[index].self_attn = module
+        prepared[index] = module
+    # Do not mutate the decoder until all modules are constructed and placed.
+    assigned: list[int] = []
+    try:
+        for index, module in prepared.items():
+            layers[index].self_attn = module
+            assigned.append(index)
+    except Exception:
+        for index in reversed(assigned):
+            layers[index].self_attn = originals[index]
+        raise
     return originals
 
 

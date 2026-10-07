@@ -12,7 +12,7 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 
 1. **prepare** — SFT を streaming で読み、token quota に従って calibration JSONL を作成します。既定値は 100K tokens / sequence 長 2048 です。
 2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。QSA fitting用に、指定した1層だけdense teacher attentionを計算してmicro-blockごとのmassへ集約し、圧縮保存できます。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
-3. **fit / fit-qsa** — GDNはteacher forcingのMSE、QSAは出力MSE＋teacher attention block-massのselector lossで、それぞれ1層ずつ局所fittingします。全32層を自動変換する処理ではありません。
+3. **fit / fit-qsa** — GDNはteacher forcingのMSE、QSAは出力MSE＋正のweightを持つteacher attention block-mass selector lossで、それぞれ1層ずつ局所fittingします。QSA selector自体の独立validation lossが改善しない成果はoverlay assemblyが拒否します。全32層を自動変換する処理ではありません。
 
 GDN/QSA attention adapterとhybrid cacheをCPU tiny-modelで検証しています。GDN recurrent state・QSA indexer raw-key state・通常KVを持つ `FlashNextDynamicCache` は `create_flash_next_cache` で作成し、QSA/GDN混在時のprefill→incremental decode parityを確認しました。GDN-onlyには `configure_hybrid_cache` も使えます。static/offloaded cacheや最適化済みlong-context kernelは未対応です。
 
@@ -108,6 +108,17 @@ configure_hybrid_cache(model, gdn_layers=[0, 3, 6])
 
 この試作では標準 causal mask と binary padding mask の DynamicCache decode を検証しています。static cache・独自 sparse mask はまだ fail-closed です。
 
+## Base-model overlay assembly
+
+32層分の各fit成果を揃えた後、`assemble` はbase configのrepo ID/commit SHA、各fit checkpointのSHA-256、独立validationでの全体/selector loss改善、QSA top-k pruning実例、およびTransformers/package/implementation fingerprintを照合し、3-GDN/1-QSA scheduleのadapter weightsとmanifestだけを一時directoryからatomicにpublishします。LLM-jp本体のweights/tokenizerは複製せず、ロード時に同じ固定revisionのbase modelを別途指定します。
+
+    make-it-flash assemble \
+      --gdn-dir artifacts/gdn-all \
+      --qsa-dir artifacts/qsa-all \
+      --output-dir artifacts/flash-next-overlay
+
+Pythonの `load_flash_next_overlay(model, overlay_dir, base_model_id=..., base_model_revision=...)` は完全なscheduleを厳密ロードしてgraftし、GDN/QSA用 `FlashNextDynamicCache` を返します。最初のcached forward/`generate`にはこのcacheを明示的に `past_key_values` として渡してください。Transformers標準の自動生成cacheはQSA indexer stateを持たず、意図的に非対応です。loaderはruntimeの `config.layer_types` を変更しますが、base modelのMLP/router/embedding/LM head/tokenizerを保存・書換しません。これはadapter overlayであり、`AutoModelForCausalLM.from_pretrained(overlay_dir)` だけでロードできるmerged checkpointではありません。現時点ではsynthetic 4層CausalLMでgraft・generation・cache decodeのみ検証済みで、実32層fit artifactはまだありません。
+
 ## Hugging Face Jobs（標準の実行方法）
 
 通常の GPU 実行には [scripts/run_hf_job.sh](scripts/run_hf_job.sh) を使います。ジョブ内で prepare → teacher cache → 1層の GDN fit を順に実行します。既定teacherは `llm-jp/llm-jp-4.1-32b-a3b-thinking` と固定revision `cda260706786758045e5e96bf4d738bbc01155b5`（`MIF_MODEL` / `MIF_MODEL_REVISION` で変更可能）です。別モデルに変更する際は対応するrevisionも指定してください。4.1向けの更新は [SaibaWaipu/make-it-flash](https://github.com/SaibaWaipu/make-it-flash) の `gdn-4.1-pilot` branch にpush済みです。実行例では `MIF_GIT_REF` でこのbranchを選びます。開始時にcloneしたcommit hashをジョブログへ表示します。
@@ -122,7 +133,7 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
     # Default is a cost-estimated dry run; no job is submitted.
     MIF_GIT_REF=gdn-4.1-pilot bash scripts/run_hf_job.sh
 
-Launchは個別の明示承認後に限ります。実行時には per-job 上限 `MIF_APPROVED_BUDGET_USD` に加えて、pilotを含む請求確認済みの累計 `MIF_CONFIRMED_CUMULATIVE_SPENT_USD` を必須入力とし、per-job上限を加えても累計 $9 を超えないことを確認します。pilot費用はログ上約 $0.27と推定しましたが請求額は未確認なので、その推定値だけでlaunchしないでください。
+Launchは個別の明示承認後に限ります。実行時には per-job 上限 `MIF_APPROVED_BUDGET_USD` に加えて、pilotを含む請求確認済みの累計 `MIF_CONFIRMED_CUMULATIVE_SPENT_USD` を必須入力とし、per-job上限を加えても累計 $9 を超えないことを確認します。$9は設計・統合枠であり、fine-tuning/post-training予算は別枠で現在$0です。pilot費用はログ上約 $0.27と推定しましたが請求額は未確認なので、その推定値だけでlaunchしないでください。
 
 既定は `a100-large`、timeout 3時間、10K tokens・seq len 1024・1 epoch・最大20 stepsです。runnerは毎回 `hf jobs hardware --json` でrateを取得し、timeoutまで動いた場合の最大compute costを計算します。現時点のHF CLI表示はA100 80GBが $2.50/時で、3時間上限は約 $7.50です。価格変更時はlive rateで再計算します。ジョブはGDN checkpointとfit metricsのみをprivate repoへuploadし、calibration dataとactivation cacheはuploadしません。**dry-runが既定で、このREADMEのコマンドではジョブは起動しません。**
 
@@ -136,13 +147,14 @@ Launchは個別の明示承認後に限ります。実行時には per-job 上�
 
 - artifacts/data/: tokenized calibration.jsonl, data_manifest.json
 - artifacts/cache/: sequence ごとの teacher input/output safetensors、任意のQSA block-mass targets、cache_manifest.json
-- artifacts/gdn/: 単独 GDN の safetensors と fit metrics JSON
+- artifacts/gdn/・artifacts/qsa/: 単独 GDN/QSA の safetensors と fit metrics JSON
+- artifacts/flash-next-overlay/: 24+8（32層時）adapter weights、revision/config manifest、SHA-256。base model/tokenizer weightsは含まない
 
 大きな data、cache、weights、Hub cache は [.gitignore](.gitignore) で除外しています。データセット由来のデータや派生物を公開・再配布する場合は、元 dataset の条件を別途確認してください。
 
 ## Validation status
 
-ローカル pytest は40件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fit、QSA/GDN混在の `FlashNextDynamicCache` prefill/decode parityを検証しました。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+ローカル pytest は55件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitを検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validation・QSA pruning実例・checkpoint hash/runtime fingerprintも検証します。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
 
 2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 

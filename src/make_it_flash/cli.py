@@ -68,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     fit_qsa.add_argument("--seed", type=int, default=17)
     fit_qsa.add_argument("--allow-cpu", action="store_true", help="allow slow CPU fitting for tiny smoke tests only")
     fit_qsa.add_argument("--overwrite", action="store_true")
+
+    assemble = commands.add_parser("assemble", help="package complete GDN/QSA layer fits as a base-model overlay")
+    assemble.add_argument("--model", default=DEFAULT_MODEL)
+    assemble.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)
+    assemble.add_argument("--gdn-dir", type=Path, required=True)
+    assemble.add_argument("--qsa-dir", type=Path, required=True)
+    assemble.add_argument("--output-dir", type=Path, default=Path("artifacts/flash_next_overlay"))
+    assemble.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -120,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_cpu=args.allow_cpu,
             overwrite=args.overwrite,
         )
-    else:
+    elif args.command == "fit-qsa":
         from .fit_qsa import fit_qsa_layer
 
         result = fit_qsa_layer(
@@ -134,6 +142,22 @@ def main(argv: list[str] | None = None) -> int:
             validation_fraction=args.validation_fraction,
             seed=args.seed,
             allow_cpu=args.allow_cpu,
+            overwrite=args.overwrite,
+        )
+    else:
+        from transformers import AutoConfig
+        from .overlay import assemble_flash_next_overlay
+
+        base_config = AutoConfig.from_pretrained(
+            args.model, revision=args.model_revision, trust_remote_code=False
+        )
+        result = assemble_flash_next_overlay(
+            base_config=base_config,
+            base_model_id=args.model,
+            base_model_revision=args.model_revision,
+            gdn_fit_dir=args.gdn_dir,
+            qsa_fit_dir=args.qsa_dir,
+            output_dir=args.output_dir,
             overwrite=args.overwrite,
         )
     _json_output(result)

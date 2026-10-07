@@ -451,11 +451,23 @@ class QSAQwen3MoeAttentionAdapter(nn.Module):
             raise NotImplementedError("QSA cache was supplied while use_cache=False")
         if past_key_values is not None and self.layer_idx is None:
             raise NotImplementedError("cached QSA requires the decoder layer_idx")
-        if attention_mask is None:
-            raise NotImplementedError("QSA requires an explicit causal/padding attention mask")
         if hidden_states.ndim != 3 or hidden_states.shape[-1] != self.hidden_size:
             raise ValueError("hidden_states must match (batch, sequence, hidden_size)")
         batch_size, seq_len, _ = hidden_states.shape
+        if attention_mask is None:
+            past_length = (
+                int(past_key_values.get_seq_length(self.layer_idx))
+                if past_key_values is not None
+                else 0
+            )
+            key_length = past_length + seq_len
+            query_positions = torch.arange(
+                past_length, key_length, device=hidden_states.device
+            )
+            key_positions = torch.arange(key_length, device=hidden_states.device)
+            attention_mask = (key_positions[None, :] <= query_positions[:, None])[
+                None, None, :, :
+            ].expand(batch_size, 1, seq_len, key_length)
         positions = _normalize_position_ids(position_ids, batch_size, seq_len, hidden_states.device)
         attention_mask = attention_mask.to(device=hidden_states.device)
         selected_mask = self.indexer(

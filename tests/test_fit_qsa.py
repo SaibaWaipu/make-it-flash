@@ -2,9 +2,11 @@ import json
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 from make_it_flash.fit_qsa import fit_qsa_layer
+from make_it_flash.provenance import checkpoint_provenance, sha256_file
 
 
 QSA_CONFIG = {
@@ -65,8 +67,38 @@ def test_fit_qsa_layer_writes_standalone_checkpoint_from_teacher_maps(tmp_path: 
     assert metrics["steps"] == 1
     assert metrics["selector_pruning_examples"] == 2
     assert metrics["initial_validation"]["selection_loss"] >= 0
-    assert (output_dir / "qsa_layer_00.safetensors").is_file()
+    checkpoint = output_dir / "qsa_layer_00.safetensors"
+    assert checkpoint.is_file()
     assert (output_dir / "fit_qsa_layer_00.json").is_file()
+    with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
+        metadata = handle.metadata()
+    assert all(metadata[key] == value for key, value in checkpoint_provenance().items())
+    assert metrics["checkpoint_sha256"] == sha256_file(checkpoint)
+
+
+def test_fit_qsa_requires_positive_selector_loss_weight(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    manifest = {
+        "model_id": "fixture/model",
+        "model_revision": "fixture",
+        "layers": [0],
+        "attention_layers": [0],
+        "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
+        "qsa_config": QSA_CONFIG,
+    }
+    (cache_dir / "cache_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="selector_loss_weight must all be positive"):
+        fit_qsa_layer(
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            layer=0,
+            selector_loss_weight=0,
+            allow_cpu=True,
+        )
 
 
 def test_fit_qsa_requires_teacher_attention_maps(tmp_path: Path):

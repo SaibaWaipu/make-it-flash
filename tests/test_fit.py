@@ -3,10 +3,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 from make_it_flash.fit import fit_one_layer
 from make_it_flash.model import make_gdn
+from make_it_flash.provenance import checkpoint_provenance, sha256_file
 
 
 def test_fit_writes_standalone_checkpoint(tmp_path: Path):
@@ -53,9 +55,14 @@ def test_fit_writes_standalone_checkpoint(tmp_path: Path):
         validation_fraction=0,
         allow_cpu=True,
     )
+    checkpoint = output_dir / "gdn_layer_00.safetensors"
     assert metrics["steps"] == 1
-    assert (output_dir / "gdn_layer_00.safetensors").is_file()
+    assert checkpoint.is_file()
     assert (output_dir / "fit_layer_00.json").is_file()
+    with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
+        metadata = handle.metadata()
+    assert all(metadata[key] == value for key, value in checkpoint_provenance().items())
+    assert metrics["checkpoint_sha256"] == sha256_file(checkpoint)
 
 
 def test_fit_one_step_at_llm_jp_41_width(tmp_path: Path):

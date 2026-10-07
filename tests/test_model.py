@@ -70,6 +70,65 @@ def test_make_qsa_and_graft_attention_modules_validate_before_mutating():
     assert next(qsa.parameters()).dtype == next(original.parameters()).dtype
 
 
+def test_graft_attention_modules_does_not_partially_mutate_on_placement_failure():
+    class FailingPlacement(nn.Module):
+        def to(self, *args, **kwargs):
+            raise RuntimeError("synthetic placement failure")
+
+    model = Qwen3MoeModel(_tiny_qwen3_moe_config(num_hidden_layers=2))
+    original = [layer.self_attn for layer in model.layers]
+    qsa = make_qsa(
+        SimpleNamespace(model_type="qwen3_moe", hidden_size=64),
+        num_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        rotary_dim=8,
+        index_n_heads=2,
+        index_head_dim=8,
+        token_budget=4,
+        compress_ratio=2,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic placement failure"):
+        graft_attention_modules(model, {0: qsa, 1: FailingPlacement()})
+
+    assert all(layer.self_attn is before for layer, before in zip(model.layers, original))
+
+
+def test_graft_attention_modules_rolls_back_assignment_failure():
+    class LayerWithFailingAttentionSetter(nn.Module):
+        def __init__(self, attention, *, fail_assignment=False):
+            super().__init__()
+            self._fail_attention_assignment = False
+            self.self_attn = attention
+            self._fail_attention_assignment = fail_assignment
+
+        def __setattr__(self, name, value):
+            if name == "self_attn" and getattr(self, "_fail_attention_assignment", False):
+                raise RuntimeError("synthetic graft assignment failure")
+            super().__setattr__(name, value)
+
+    class TinyDecoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(model_type="qwen3_moe")
+            self.layers = nn.ModuleList(
+                [
+                    LayerWithFailingAttentionSetter(nn.Linear(8, 8)),
+                    LayerWithFailingAttentionSetter(nn.Linear(8, 8), fail_assignment=True),
+                ]
+            )
+
+    model = TinyDecoder()
+    original = [layer.self_attn for layer in model.layers]
+    replacements = {0: nn.Linear(8, 8), 1: nn.Linear(8, 8)}
+
+    with pytest.raises(RuntimeError, match="synthetic graft assignment failure"):
+        graft_attention_modules(model, replacements)
+
+    assert all(layer.self_attn is before for layer, before in zip(model.layers, original))
+
+
 def test_gdn_forward_at_llm_jp_41_hidden_width():
     config = SimpleNamespace(
         model_type="qwen3_moe",
