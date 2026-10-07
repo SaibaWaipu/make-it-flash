@@ -14,9 +14,9 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
 3. **fit** — Transformers の Qwen3NextGatedDeltaNet を teacher forcing の MSE で局所 fitting します。GDN head layout はQwen3.8-Flash-Next参照値のQK 16 / V 48、head dim 128、sigmoid output gateです。
 
-限定的な `Qwen3MoeAttention` adapterで、tiny Qwen3-MoEへのno-cache graftをCPU検証しています。maskなし・2-D binary maskに加え、標準的な4-D causal maskからleft/right paddingを抽出できます。nonstandard/sparse mask、hybrid cache、attention weights出力は未対応で、明示的に拒否します。
+GDN/QSA attention adapterとhybrid cacheをCPU tiny-modelで検証しています。GDN recurrent state・QSA indexer raw-key state・通常KVを持つ `FlashNextDynamicCache` は `create_flash_next_cache` で作成し、QSA/GDN混在時のprefill→incremental decode parityを確認しました。GDN-onlyには `configure_hybrid_cache` も使えます。static/offloaded cacheや最適化済みlong-context kernelは未対応です。
 
-まだ含まないもの: 全32層の置換、24 GDN + 8 Qwen Sparse Attention (QSA) への統合、ロード可能なhybrid checkpoint、Gated Residual、N-gram/PLE embeddings、cache-aware generation、global calibration、perplexity / 生成品質評価、RLVR。
+GDN、block-indexed QSA、4-stream Gated Residual、compact hashed PLE/ngram、tied-embedding MTP head、shared-expert add-onの再利用可能なprototypeを実装しました。まだ含まないもの: fitted 24 GDN + 8 QSAの全32層hybrid checkpoint、selector supervisionを含むQSA/PLE/Gated Residualの学習pipeline、global calibration、Japanese perplexity / generation品質評価、long-context performance検証、vision/video、RLVR。
 
 ## Qwen3.8-Flash-Next reference
 
@@ -24,7 +24,7 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 
 参照形状はGDNがQK 16 / V 48 heads × 128、sigmoid output gate、QSAが24 Q / 2 KV heads × 256。QSA indexerは4 query heads / 1 shared key head × 128、512 micro-blocks（2048 tokens）budget、compression ratio 4です。Qwen3.8は48層・262K contextのvision/videoモデルで、125B core (6B activated)に約51B n-gram/PLE embeddingsと4B MTPを持ち、MoEは512 routed expertsからtop-10に加えてshared expertを使います。さらに4-stream Gated Residual (rank 320)を備えます。これらの巨大な追加機構・MoE重みを移植するのではなく、初期方針どおりLLM-jpのtokenizer・128 experts/top-8・日本語能力を保持します。
 
-このpilotはQwen3-NextのGDN実装を使い、16/48 head layoutとsigmoid output-gate RMSNormを合わせた近似です。Qwen4Expのhyper-connectionsやQSA blockそのものを使ってはいません。Qwen3.8 configの `transformers_version` は `5.8.0.dev0` で、ローカルの5.5.0では `qwen4_exp` を認識しません。将来QSAを統合する段階では、Qwen4Exp対応のTransformers版または検証済み実装を別途固定する必要があります。
+GDN pilotはQwen3-Next実装に16/48 head layoutとsigmoid output-gate RMSNormを合わせた近似です。QSA/Gated Residual/PLE prototypeは公開Qwen4Exp実装の機構を参考に独立実装しており、公式Qwen3.8 checkpointから重みを移植したものではありません。reference configの `transformers_version` は `5.8.0.dev0` で、ローカル5.5.0は `qwen4_exp` を認識しません。HF pilotではTransformers 5.19.0でQwen3-MoE teacherを実行しました。
 
 ## Calibration mix
 
@@ -128,7 +128,9 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
 
 ## Validation status
 
-ローカル pytest は14件通過しました。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。stream worker終了警告はmanifestに記録されていますが、全100 tokensが保存されています。hidden size 2560・QK 16/V 48・sigmoid gateのGDN CPU forwardと、合成activationを使った1 step CPU fitも通過しています（実teacher出力によるfitではありません）。さらにtiny Qwen3-MoE decoder/modelにGDN adapterを挿し、left/right paddingを含む標準causal maskでno-cache CPU forwardを検証しました。GDN safetensors再読込後も出力が一致し、MoE/Normは保持されます。hybrid cacheとnonstandard/sparse maskは未対応です。32B BF16重みのGPU load、実activation fit、HF Jobs完走は未検証です。Qwen3.8本体の `qwen4_exp` はローカルTransformers 5.5.0では未対応です。
+ローカル pytest は31件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parity、QSA block selection・auxiliary selector loss、QSA/GDN混在の `FlashNextDynamicCache` prefill/decode parityを検証しました。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+
+2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 
 ## License
 
