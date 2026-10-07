@@ -7,6 +7,7 @@ import torch
 
 from make_it_flash.evaluation import (
     _evaluation_data_provenance,
+    _japanese_tokenizer_probe,
     _preflight_evaluation_sequences,
     _score_tokenized_jsonl,
 )
@@ -22,6 +23,26 @@ TRAINING_PROVENANCE = {
     "dataset_revision": "3" * 40,
     "split": "train",
 }
+
+
+class ProbeTokenizer:
+    text = "日本語の能力・tokenizer・MoE資産を維持します。"
+
+    def encode(self, text, *, add_special_tokens):
+        assert text == self.text
+        assert add_special_tokens is False
+        return [1, 2, 3]
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+        assert messages == [{"role": "user", "content": self.text}]
+        assert tokenize is True
+        assert add_generation_prompt is True
+        return torch.tensor([[4, 5, 6, 7]])
+
+    def decode(self, token_ids, *, skip_special_tokens):
+        assert token_ids == [1, 2, 3]
+        assert skip_special_tokens is False
+        return self.text
 
 
 class UniformLM(torch.nn.Module):
@@ -63,6 +84,23 @@ def _write_eval_corpus(tmp_path: Path, *, split: str = "validation") -> Path:
         encoding="utf-8",
     )
     return data_file
+
+
+def test_japanese_tokenizer_probe_records_text_and_chat_ids():
+    report = _japanese_tokenizer_probe(ProbeTokenizer(), vocab_size=8)
+
+    assert report["roundtrip_exact"] is True
+    assert report["token_ids"] == [1, 2, 3]
+    assert report["chat_template_token_ids"] == [4, 5, 6, 7]
+
+
+def test_japanese_tokenizer_probe_rejects_out_of_vocab_chat_ids():
+    class BadProbeTokenizer(ProbeTokenizer):
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            return [1, 2, 8]
+
+    with pytest.raises(ValueError, match="outside vocabulary size 8"):
+        _japanese_tokenizer_probe(BadProbeTokenizer(), vocab_size=8)
 
 
 def test_evaluation_preflight_requires_qsa_pruning_in_scored_examples(tmp_path):

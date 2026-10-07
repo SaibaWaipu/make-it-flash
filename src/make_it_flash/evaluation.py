@@ -229,6 +229,53 @@ def _score_tokenized_jsonl(
     }
 
 
+def _japanese_tokenizer_probe(tokenizer: Any, vocab_size: int) -> dict[str, Any]:
+    """Verify and record Japanese text and chat-template tokenization."""
+    text = "日本語の能力・tokenizer・MoE資産を維持します。"
+
+    def _normalize_ids(value: Any, label: str) -> list[int]:
+        if isinstance(value, dict):
+            value = value.get("input_ids")
+        if isinstance(value, torch.Tensor):
+            value = value.tolist()
+        if isinstance(value, tuple):
+            value = list(value)
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            if len(value) != 1:
+                raise ValueError(f"{label} unexpectedly returned a batch")
+            value = value[0]
+        if not isinstance(value, list) or not value or any(
+            not isinstance(token, int) or isinstance(token, bool) for token in value
+        ):
+            raise ValueError(f"{label} must return non-empty integer token IDs")
+        if min(value) < 0 or max(value) >= vocab_size:
+            raise ValueError(f"{label} returned token IDs outside vocabulary size {vocab_size}")
+        return value
+
+    try:
+        text_ids = _normalize_ids(tokenizer.encode(text, add_special_tokens=False), "Japanese encode probe")
+        chat_ids = _normalize_ids(
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": text}], tokenize=True, add_generation_prompt=True
+            ),
+            "Japanese chat-template probe",
+        )
+        decoded = tokenizer.decode(text_ids, skip_special_tokens=False)
+    except Exception as exc:
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError("pinned tokenizer failed the Japanese text/chat-template probe") from exc
+    if not isinstance(decoded, str):
+        raise ValueError("tokenizer.decode must return text for the Japanese round-trip probe")
+    return {
+        "text": text,
+        "token_ids": text_ids,
+        "decoded_text": decoded,
+        "roundtrip_exact": decoded == text,
+        "chat_template_token_ids": chat_ids,
+    }
+
+
 def evaluate_flash_next(
     *,
     data_file: str | Path,
@@ -345,6 +392,7 @@ def evaluate_flash_next(
         "commit_hash": tokenizer_commit or base_model_revision,
         "special_token_ids": special_token_ids,
     }
+    tokenizer_probe = _japanese_tokenizer_probe(tokenizer, vocab_size)
     del tokenizer
 
     _require_eval_gpu_memory(min_free_gib)
@@ -408,6 +456,7 @@ def evaluate_flash_next(
         "base_model_revision": base_model_revision,
         "overlay_manifest_sha256": overlay_manifest_sha256,
         "tokenizer": tokenizer_record,
+        "japanese_tokenizer_probe": tokenizer_probe,
         "calibration_data": calibration_data,
         "evaluation_data": evaluation_data,
         "requires_qsa_pruning_evidence": require_qsa_pruning,
