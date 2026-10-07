@@ -80,6 +80,63 @@ def _evaluation_data_provenance(
     return manifest, provenance
 
 
+def _preflight_evaluation_sequences(
+    data_file: str | Path,
+    *,
+    vocab_size: int,
+    context_limit: int | None,
+    pruning_threshold: int,
+    max_examples: int | None = None,
+    require_pruning: bool = True,
+) -> dict[str, int]:
+    if vocab_size <= 1 or pruning_threshold <= 1:
+        raise ValueError("vocab_size and pruning_threshold must be greater than one")
+    examples = 0
+    pruning_examples = 0
+    max_sequence_length = 0
+    source_path = Path(data_file)
+    with source_path.open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid evaluation JSON at {source_path}:{line_number}") from exc
+            token_ids = row.get("input_ids") if isinstance(row, dict) else None
+            if not isinstance(token_ids, list) or any(
+                not isinstance(token, int) or isinstance(token, bool) for token in token_ids
+            ):
+                raise ValueError(f"evaluation row {line_number} must contain integer input_ids")
+            if len(token_ids) < 2:
+                continue
+            if context_limit and len(token_ids) > context_limit:
+                raise ValueError(
+                    f"evaluation row {line_number} has {len(token_ids)} tokens, exceeding context limit {context_limit}"
+                )
+            if min(token_ids) < 0 or max(token_ids) >= vocab_size:
+                raise ValueError(f"evaluation row {line_number} contains token IDs outside vocabulary size {vocab_size}")
+            examples += 1
+            max_sequence_length = max(max_sequence_length, len(token_ids))
+            if len(token_ids) >= pruning_threshold:
+                pruning_examples += 1
+            if max_examples is not None and examples >= max_examples:
+                break
+    if examples == 0:
+        raise ValueError("evaluation corpus contains no sequences with at least two tokens")
+    if require_pruning and pruning_examples == 0:
+        raise ValueError(
+            f"held-out evaluation needs at least one sequence of {pruning_threshold} tokens to exercise QSA pruning; "
+            f"found none among {examples} scored examples (max length {max_sequence_length})"
+        )
+    return {
+        "scored_examples": examples,
+        "qsa_pruning_examples": pruning_examples,
+        "required_sequence_length": pruning_threshold,
+        "max_sequence_length": max_sequence_length,
+    }
+
+
 def _score_tokenized_jsonl(
     model: Any,
     data_file: str | Path,
@@ -182,6 +239,7 @@ def evaluate_flash_next(
     max_examples: int | None = None,
     target_chunk_tokens: int = 64,
     min_free_gib: float = 66.0,
+    require_qsa_pruning: bool = True,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Compare next-token perplexity for a pinned base and its complete overlay.
@@ -229,6 +287,26 @@ def evaluate_flash_next(
         model_id=base_model_id,
         model_revision=base_model_revision,
         calibration_data=calibration_data,
+    )
+    if not isinstance(require_qsa_pruning, bool):
+        raise ValueError("require_qsa_pruning must be a bool")
+    qsa_config = overlay_manifest.get("qsa_config")
+    base_config = overlay_manifest.get("base_config")
+    if not isinstance(qsa_config, dict) or not isinstance(base_config, dict):
+        raise ValueError("overlay lacks QSA/base config needed for evaluation preflight")
+    compress_ratio = int(qsa_config.get("compress_ratio", 0))
+    token_budget = int(qsa_config.get("token_budget", 0))
+    if compress_ratio <= 0 or token_budget < compress_ratio:
+        raise ValueError("overlay qsa_config has an invalid token_budget/compress_ratio")
+    pruning_threshold = (token_budget // compress_ratio + 1) * compress_ratio
+    context_limit = int(base_config.get("max_position_embeddings", 0)) or None
+    pruning_preflight = _preflight_evaluation_sequences(
+        data_file,
+        vocab_size=int(base_config["vocab_size"]),
+        context_limit=context_limit,
+        pruning_threshold=pruning_threshold,
+        max_examples=max_examples,
+        require_pruning=require_qsa_pruning,
     )
 
     try:
@@ -332,6 +410,8 @@ def evaluate_flash_next(
         "tokenizer": tokenizer_record,
         "calibration_data": calibration_data,
         "evaluation_data": evaluation_data,
+        "requires_qsa_pruning_evidence": require_qsa_pruning,
+        "qsa_pruning_preflight": pruning_preflight,
         "max_examples": max_examples,
         "target_chunk_tokens": target_chunk_tokens,
         "base": base_metrics,

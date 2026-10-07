@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from make_it_flash.evaluation import _evaluation_data_provenance, _score_tokenized_jsonl
+from make_it_flash.evaluation import (
+    _evaluation_data_provenance,
+    _preflight_evaluation_sequences,
+    _score_tokenized_jsonl,
+)
 from make_it_flash.provenance import sha256_file
 
 
@@ -59,6 +63,39 @@ def _write_eval_corpus(tmp_path: Path, *, split: str = "validation") -> Path:
         encoding="utf-8",
     )
     return data_file
+
+
+def test_evaluation_preflight_requires_qsa_pruning_in_scored_examples(tmp_path):
+    data_file = tmp_path / "heldout.jsonl"
+    data_file.write_text(
+        json.dumps({"input_ids": [0, 1, 2, 3, 4]})
+        + "\n"
+        + json.dumps({"input_ids": [0, 1, 2, 3, 4, 5]})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="at least one sequence of 6 tokens"):
+        _preflight_evaluation_sequences(
+            data_file,
+            vocab_size=8,
+            context_limit=8,
+            pruning_threshold=6,
+            max_examples=1,
+        )
+
+    summary = _preflight_evaluation_sequences(
+        data_file,
+        vocab_size=8,
+        context_limit=8,
+        pruning_threshold=6,
+    )
+    assert summary == {
+        "scored_examples": 2,
+        "qsa_pruning_examples": 1,
+        "required_sequence_length": 6,
+        "max_sequence_length": 6,
+    }
 
 
 def test_score_tokenized_jsonl_reports_perplexity_and_category_counts(tmp_path):

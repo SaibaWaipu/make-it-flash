@@ -86,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--max-examples", type=int)
     evaluate.add_argument("--target-chunk-tokens", type=int, default=64)
     evaluate.add_argument("--min-free-gib", type=float, default=66.0)
+    evaluate.add_argument(
+        "--allow-no-qsa-pruning",
+        action="store_true",
+        help="allow short-context PPL that does not exercise QSA top-k pruning",
+    )
     evaluate.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -167,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             max_examples=args.max_examples,
             target_chunk_tokens=args.target_chunk_tokens,
             min_free_gib=args.min_free_gib,
+            require_qsa_pruning=not args.allow_no_qsa_pruning,
             overwrite=args.overwrite,
         )
     else:
