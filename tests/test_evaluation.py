@@ -5,12 +5,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from make_it_flash import evaluation as evaluation_module
 from make_it_flash.evaluation import (
     _evaluation_data_provenance,
     _japanese_tokenizer_probe,
     _preflight_evaluation_sequences,
     _score_tokenized_jsonl,
 )
+from make_it_flash.overlay import OVERLAY_FILENAME, OVERLAY_KIND, OVERLAY_VERSION
 from make_it_flash.provenance import sha256_file
 
 
@@ -200,6 +202,110 @@ def test_evaluation_provenance_rejects_exact_calibration_corpus(tmp_path):
             model_revision=MODEL_REVISION,
             calibration_data=training,
         )
+
+
+def test_evaluate_flash_next_runs_base_then_overlay_without_real_gpu_or_weights(tmp_path, monkeypatch):
+    import transformers
+
+    overlay_dir = tmp_path / "overlay"
+    overlay_dir.mkdir()
+    calibration_data = {
+        "data_sha256": "1" * 64,
+        "manifest_sha256": "2" * 64,
+        "dataset_id": "fixture/dataset",
+        "dataset_revision": "3" * 40,
+        "split": "train",
+    }
+    (overlay_dir / OVERLAY_FILENAME).write_text(
+        json.dumps(
+            {
+                "format": OVERLAY_KIND,
+                "format_version": OVERLAY_VERSION,
+                "base_model_id": MODEL_ID,
+                "base_model_revision": MODEL_REVISION,
+                "calibration_data": calibration_data,
+                "qsa_config": {"token_budget": 4, "compress_ratio": 2},
+                "base_config": {"vocab_size": 8, "max_position_embeddings": 10},
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "heldout"
+    data_dir.mkdir()
+    data_file = data_dir / "evaluation.jsonl"
+    data_file.write_text(
+        json.dumps({"sample_id": "jp-long", "category": "japanese", "input_ids": [0, 1, 2, 3, 4, 5]})
+        + "\n",
+        encoding="utf-8",
+    )
+    data_file.with_name("data_manifest.json").write_text(
+        json.dumps(
+            {
+                "data_file": data_file.name,
+                "model_id": MODEL_ID,
+                "model_revision": MODEL_REVISION,
+                "dataset_id": "fixture/dataset",
+                "dataset_revision": "3" * 40,
+                "split": "validation",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def config():
+        return SimpleNamespace(
+            _name_or_path=MODEL_ID,
+            _commit_hash=MODEL_REVISION,
+            model_type="qwen3_moe",
+            vocab_size=8,
+            max_position_embeddings=10,
+        )
+
+    class FakeTokenizer(ProbeTokenizer):
+        name_or_path = MODEL_ID
+        _commit_hash = MODEL_REVISION
+        init_kwargs = {"_commit_hash": MODEL_REVISION}
+        all_special_ids = [0]
+
+        def __len__(self):
+            return 8
+
+        def get_vocab(self):
+            return {f"token-{index}": index for index in range(8)}
+
+    model_loads = []
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            model_loads.append((args, kwargs))
+            model = UniformLM(vocab_size=8)
+            model.config = config()
+            return model
+
+    monkeypatch.setattr(transformers, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config()))
+    monkeypatch.setattr(transformers, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda *a, **k: FakeTokenizer()))
+    monkeypatch.setattr(transformers, "AutoModelForCausalLM", FakeAutoModel)
+    monkeypatch.setattr(evaluation_module, "_require_eval_gpu_memory", lambda min_free_gib: None)
+    monkeypatch.setattr(evaluation_module, "load_flash_next_overlay", lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    output_file = tmp_path / "report.json"
+    report = evaluation_module.evaluate_flash_next(
+        data_file=data_file,
+        overlay_dir=overlay_dir,
+        output_file=output_file,
+        base_model_id=MODEL_ID,
+        base_model_revision=MODEL_REVISION,
+        target_chunk_tokens=2,
+    )
+
+    assert len(model_loads) == 2
+    assert report["base"]["perplexity"] == pytest.approx(8.0)
+    assert report["hybrid"]["perplexity"] == pytest.approx(8.0)
+    assert report["qsa_pruning_preflight"]["qsa_pruning_examples"] == 1
+    assert report["japanese_tokenizer_probe"]["roundtrip_exact"] is True
+    assert json.loads(output_file.read_text(encoding="utf-8"))["relative_perplexity_change"] == pytest.approx(0.0)
 
 
 def test_score_tokenized_jsonl_rejects_token_ids_outside_base_vocab(tmp_path):
