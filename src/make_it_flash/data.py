@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+DEFAULT_MODEL_ID = "llm-jp/llm-jp-4.1-32b-a3b-thinking"
+DEFAULT_MODEL_REVISION = "cda260706786758045e5e96bf4d738bbc01155b5"
 DATASET_ID = "llm-jp/llm-jp-4.1-thinking-sft-data"
 
 
@@ -144,8 +146,8 @@ def _stable_seed(seed: int, config: str) -> int:
 def prepare_calibration_data(
     *,
     output_dir: str | Path,
-    model_id: str = "llm-jp/llm-jp-4.1-32b-a3b-thinking",
-    model_revision: str = "main",
+    model_id: str = DEFAULT_MODEL_ID,
+    model_revision: str = DEFAULT_MODEL_REVISION,
     dataset_id: str = DATASET_ID,
     dataset_revision: str = "main",
     split: str = "reasoning_medium",

@@ -6,15 +6,23 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 
 ## Scope
 
-既定の teacher は [llm-jp/llm-jp-4.1-32b-a3b-thinking](https://huggingface.co/llm-jp/llm-jp-4.1-32b-a3b-thinking)、校正データは [llm-jp/llm-jp-4.1-thinking-sft-data](https://huggingface.co/datasets/llm-jp/llm-jp-4.1-thinking-sft-data) です。初期実験では tokenizer、embedding、MoE experts/router、LM head、RMSNorm を変更しません。
+既定の teacher は [llm-jp/llm-jp-4.1-32b-a3b-thinking](https://huggingface.co/llm-jp/llm-jp-4.1-32b-a3b-thinking) の revision `cda260706786758045e5e96bf4d738bbc01155b5`、校正データは [llm-jp/llm-jp-4.1-thinking-sft-data](https://huggingface.co/datasets/llm-jp/llm-jp-4.1-thinking-sft-data) です。初期実験では tokenizer、embedding、MoE experts/router、LM head、RMSNorm を変更しません。
 
 実行する3段階:
 
 1. **prepare** — SFT を streaming で読み、token quota に従って calibration JSONL を作成します。既定値は 100K tokens / sequence 長 2048 です。
 2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
-3. **fit** — Transformers の Qwen3NextGatedDeltaNet を teacher forcing の MSE で局所 fitting します。
+3. **fit** — Transformers の Qwen3NextGatedDeltaNet を teacher forcing の MSE で局所 fitting します。GDN head layout はQwen3.8-Flash-Next参照値のQK 16 / V 48、head dim 128、sigmoid output gateです。
 
-まだ含まないもの: 全32層の置換、24 GDN + 8 attention への統合、cache-aware generation、global calibration、perplexity / 生成品質評価、RLVR。
+まだ含まないもの: 全32層の置換、24 GDN + 8 Qwen Sparse Attention (QSA) への統合、Gated Residual、N-gram/PLE embeddings、cache-aware generation、global calibration、perplexity / 生成品質評価、RLVR。
+
+## Qwen3.8-Flash-Next reference
+
+[公式HF model card](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) と [config](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/config.json) を確認しました。この名前のrepoは `model_type=qwen4_exp` / `Qwen4ExpForConditionalGeneration` のマルチモーダルpreviewです。言語部は48層で **3 Gated DeltaNet + 1 QSA** を繰り返し、36 GDN + 12 QSA（75/25）。32層のLLM-jpへ比率だけ移す候補は **24 GDN + 8 QSA** です。model cardによるとQSAは個々のtokenではなくmicro-block単位でselectionし、config中の `full_attention` markersはQwen4Exp実装でindexer付きattentionへ変換されます。したがってQSAをdense full attentionと同一視しません。
+
+参照形状はGDNがQK 16 / V 48 heads × 128、sigmoid output gate、QSAが24 Q / 2 KV heads × 256。QSA indexerは4 query heads / 1 shared key head × 128、512 micro-blocks（2048 tokens）budget、compression ratio 4です。Qwen3.8は48層・262K contextのvision/videoモデルで、125B core (6B activated)に約51B n-gram/PLE embeddingsと4B MTPを持ち、MoEは512 routed expertsからtop-10に加えてshared expertを使います。さらに4-stream Gated Residual (rank 320)を備えます。これらの巨大な追加機構・MoE重みを移植するのではなく、初期方針どおりLLM-jpのtokenizer・128 experts/top-8・日本語能力を保持します。
+
+このpilotはQwen3-NextのGDN実装を使い、16/48 head layoutとsigmoid output-gate RMSNormを合わせた近似です。Qwen4Expのhyper-connectionsやQSA blockそのものを使ってはいません。Qwen3.8 configの `transformers_version` は `5.8.0.dev0` で、ローカルの5.5.0では `qwen4_exp` を認識しません。将来QSAを統合する段階では、Qwen4Exp対応のTransformers版または検証済み実装を別途固定する必要があります。
 
 ## Calibration mix
 
@@ -34,7 +42,7 @@ quota は最大剰余法で割り当て、実際に token 化した数と解決�
 
 - Python 3.10+
 - prepare: Hugging Face Hub へのネットワーク接続（モデル tokenizer と dataset）。CUDA は不要です。
-- cache / fit: CUDA 対応 PyTorch。BF16 32B teacher のため、cache は既定で **空き CUDA memory 66 GiB 以上**を確認します。T4 × 2 の約29–32 GBではこの BF16 pass は実行できません。A100 80 GB でも他プロセス等で空きが足りなければ preflight が停止します。
+- cache / fit: CUDA 対応 PyTorch。cache は既定で **空き CUDA memory 66 GiB 以上**を確認します。固定した4.1 revisionには13 safetensors（64.28 GB / 59.87 GiB）があり、これはweightのstorage sizeのみで実際のVRAM要件ではありません。T4 × 2 の約29–32 GBではこのBF16 passは実行できず、A100 80 GBでも空きが66 GiB未満ならpreflightが停止します。
 
 ## Quick start
 
@@ -68,7 +76,7 @@ prepare の出力 mix が目標に達しない場合は data_manifest.json の a
 
 ## Hugging Face Jobs（標準の実行方法）
 
-通常の GPU 実行には [scripts/run_hf_job.sh](scripts/run_hf_job.sh) を使います。ジョブ内で prepare → teacher cache → 1層の GDN fit を順に実行します。既定の teacher は `llm-jp/llm-jp-4.1-32b-a3b-thinking`（`MIF_MODEL` で変更可能）です。4.1向けの更新は [SaibaWaipu/make-it-flash](https://github.com/SaibaWaipu/make-it-flash) の `gdn-4.1-pilot` branch にpush済みです。実行例では `MIF_GIT_REF` でこのbranchを選びます。開始時にcloneしたcommit hashをジョブログへ表示します。
+通常の GPU 実行には [scripts/run_hf_job.sh](scripts/run_hf_job.sh) を使います。ジョブ内で prepare → teacher cache → 1層の GDN fit を順に実行します。既定teacherは `llm-jp/llm-jp-4.1-32b-a3b-thinking` と固定revision `cda260706786758045e5e96bf4d738bbc01155b5`（`MIF_MODEL` / `MIF_MODEL_REVISION` で変更可能）です。別モデルに変更する際は対応するrevisionも指定してください。4.1向けの更新は [SaibaWaipu/make-it-flash](https://github.com/SaibaWaipu/make-it-flash) の `gdn-4.1-pilot` branch にpush済みです。実行例では `MIF_GIT_REF` でこのbranchを選びます。開始時にcloneしたcommit hashをジョブログへ表示します。
 
 ### 出力先の private repo ID
 
@@ -97,7 +105,7 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
 
 ## Validation status
 
-ローカル pytest は11件通過しました。既定 teacher を `llm-jp/llm-jp-4.1-32b-a3b-thinking` に切り替え、実データ100 tokens の prepare smoke test を実行し、35/25/15/15/10 の mix と解決済み model revision を確認しました。stream worker の終了警告は manifest に記録されていますが、全100 tokens が保存されています。hidden size 2560でGDN blockのCPU forwardと、合成activationを使った1 stepのCPU fitも通過しています。これは実teacher出力によるfitではありません。32B BF16 teacher cacheと実activationでのfit、HF Jobs上の完走は未検証です。
+ローカル pytest は12件通過しました。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。stream worker終了警告はmanifestに記録されていますが、全100 tokensが保存されています。hidden size 2560・QK 16/V 48・sigmoid gateのGDN CPU forwardと、合成activationを使った1 step CPU fitも通過しています（実teacher出力によるfitではありません）。32B BF16重みのGPU load、実activation fit、HF Jobs完走は未検証です。Qwen3.8本体の `qwen4_exp` はローカルTransformers 5.5.0では未対応です。
 
 ## License
 

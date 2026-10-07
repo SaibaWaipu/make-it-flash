@@ -6,7 +6,9 @@ import argparse
 import json
 from pathlib import Path
 
-DEFAULT_MODEL = "llm-jp/llm-jp-4.1-32b-a3b-thinking"
+from .data import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION
+
+DEFAULT_MODEL = DEFAULT_MODEL_ID
 
 
 def _json_output(value):
@@ -20,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = commands.add_parser("prepare", help="stream and tokenize a balanced calibration subset")
     prepare.add_argument("--output-dir", type=Path, default=Path("artifacts/data"))
     prepare.add_argument("--model", default=DEFAULT_MODEL)
-    prepare.add_argument("--model-revision", default="main")
+    prepare.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION)
     prepare.add_argument("--dataset", default="llm-jp/llm-jp-4.1-thinking-sft-data")
     prepare.add_argument("--dataset-revision", default="main")
     prepare.add_argument("--split", default="reasoning_medium")

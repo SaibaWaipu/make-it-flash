@@ -3,16 +3,27 @@ import json
 import pytest
 
 from make_it_flash.cli import DEFAULT_MODEL, build_parser
-from make_it_flash.data import allocate_quotas, normalize_messages, prepare_calibration_data, tokenize_messages
+from make_it_flash.data import (
+    DEFAULT_MODEL_REVISION,
+    allocate_quotas,
+    normalize_messages,
+    prepare_calibration_data,
+    tokenize_messages,
+)
 
 
 def test_default_teacher_is_llm_jp_41_thinking():
     from inspect import signature
 
     expected = "llm-jp/llm-jp-4.1-32b-a3b-thinking"
+    expected_revision = "cda260706786758045e5e96bf4d738bbc01155b5"
+    args = build_parser().parse_args(["prepare"])
     assert DEFAULT_MODEL == expected
-    assert build_parser().parse_args(["prepare"]).model == expected
+    assert args.model == expected
+    assert args.model_revision == expected_revision
     assert signature(prepare_calibration_data).parameters["model_id"].default == expected
+    assert signature(prepare_calibration_data).parameters["model_revision"].default == DEFAULT_MODEL_REVISION
+    assert DEFAULT_MODEL_REVISION == expected_revision
 
 
 def test_default_quotas_match_planned_mix():

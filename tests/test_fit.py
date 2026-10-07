@@ -76,7 +76,7 @@ def test_fit_one_step_at_llm_jp_41_width(tmp_path: Path):
             "intermediate_size": 7680,
             "rms_norm_eps": 1e-6,
         },
-        "gdn_config": {"linear_num_key_heads": 20, "linear_num_value_heads": 40},
+        "gdn_config": {"linear_num_key_heads": 16, "linear_num_value_heads": 48},
     }
     (cache_dir / "cache_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     save_file(
