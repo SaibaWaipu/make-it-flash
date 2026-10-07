@@ -68,7 +68,7 @@ prepare の出力 mix が目標に達しない場合は data_manifest.json の a
 
 ## Hugging Face Jobs（標準の実行方法）
 
-通常の GPU 実行には [scripts/run_hf_job.sh](scripts/run_hf_job.sh) を使います。ジョブ内で prepare → teacher cache → 1層の GDN fit を順に実行します。既定の teacher は `llm-jp/llm-jp-4.1-32b-a3b-thinking`（`MIF_MODEL` で変更可能）です。既定のソースは [SaibaWaipu/make-it-flash](https://github.com/SaibaWaipu/make-it-flash) の `main` branch なので、通常は `MIF_GIT_URL` / `MIF_GIT_REF` の指定は不要です。開始時にcloneしたcommit hashをジョブログへ表示します。
+通常の GPU 実行には [scripts/run_hf_job.sh](scripts/run_hf_job.sh) を使います。ジョブ内で prepare → teacher cache → 1層の GDN fit を順に実行します。既定の teacher は `llm-jp/llm-jp-4.1-32b-a3b-thinking`（`MIF_MODEL` で変更可能）です。4.1向けの更新は [SaibaWaipu/make-it-flash](https://github.com/SaibaWaipu/make-it-flash) の `gdn-4.1-pilot` branch にpush済みです。実行例では `MIF_GIT_REF` でこのbranchを選びます。開始時にcloneしたcommit hashをジョブログへ表示します。
 
 ### 出力先の private repo ID
 
@@ -77,11 +77,11 @@ prepare の出力 mix が目標に達しない場合は data_manifest.json の a
 HF CLI にログインし、private model repo の作成・書き込み権限がある token を使って実行します。スクリプトの `--secrets HF_TOKEN` がログイン中の token をジョブに渡します。
 
     hf auth login
-    MIF_OUTPUT_REPO=SaibaWaipu/make-it-flash-pilot bash scripts/run_hf_job.sh
+    MIF_GIT_REF=gdn-4.1-pilot MIF_OUTPUT_REPO=SaibaWaipu/make-it-flash-pilot bash scripts/run_hf_job.sh
 
 既定は `a100-large`、timeout は4時間です。現在の目安は A100 80 GB が約 $2.50/時、4時間で最大約 $10 ですが、料金は変動するため起動直前に確認してください。ジョブは GDN checkpoint と fit metrics のみを private repo に upload します。calibration data と activation cache は upload しません。**この README を読むだけではジョブは起動せず、課金も発生しません。**
 
-このスクリプトは既定で上記の公開 Git remote の `main` を clone します。手元の変更を使うには、先に GitHub へ push し、必要なら `MIF_GIT_URL` と `MIF_GIT_REF`（branch または tag）を指定します。例: `MIF_GIT_REF=gdn-4.1-pilot MIF_OUTPUT_REPO=SaibaWaipu/make-it-flash-pilot bash scripts/run_hf_job.sh`。ジョブ内でソースコードが実行され、token も渡されるため、信頼できる remote/ref を指定してください。
+このスクリプトは既定で公開 Git remote の `main` を clone します。別の変更を使う場合は、その変更をpushした後、必要に応じて `MIF_GIT_URL` と `MIF_GIT_REF`（branch または tag）を指定してください。ジョブ内でソースコードが実行され、token も渡されるため、信頼できる remote/ref を指定してください。
 
 ## Kaggle（任意・旧手順）
 
