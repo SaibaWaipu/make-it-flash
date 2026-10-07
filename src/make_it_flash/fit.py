@@ -16,7 +16,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .model import make_gdn
-from .provenance import checkpoint_provenance, sha256_file
+from .provenance import checkpoint_provenance, sha256_file, validate_cache_sample_metadata
 
 
 def _metadata(path: Path) -> dict[str, str]:
@@ -107,6 +107,13 @@ def fit_one_layer(
     for path in all_paths:
         with safe_open(str(path), framework="pt", device="cpu") as handle:
             keys = set(handle.keys())
+            sample_metadata = handle.metadata()
+        validate_cache_sample_metadata(
+            sample_metadata,
+            path=path,
+            model_id=str(manifest["model_id"]),
+            model_revision=str(manifest["model_revision"]),
+        )
         if f"layer_{layer:02d}_input" not in keys:
             continue
         (val_paths if validation_fraction and _split_value(path) < threshold else train_paths).append(path)

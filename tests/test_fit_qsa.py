@@ -32,7 +32,12 @@ def _write_qsa_cache_example(cache_dir: Path, index: int, seq_len: int):
             "layer_00_block_mass": torch.rand(seq_len, num_blocks).to(torch.bfloat16).contiguous(),
         },
         str(cache_dir / f"sample_{index:06d}.safetensors"),
-        metadata={"sample_id": str(index), "config": "fixture"},
+        metadata={
+            "sample_id": str(index),
+            "config": "fixture",
+            "model_id": "fixture/model",
+            "model_revision": "fixture",
+        },
     )
 
 
@@ -65,7 +70,12 @@ def test_fit_qsa_layer_writes_standalone_checkpoint_from_teacher_maps(tmp_path: 
                 "layer_00_block_mass": teacher_block_mass[0].to(torch.bfloat16).contiguous(),
             },
             str(cache_dir / f"sample_{index:06d}.safetensors"),
-            metadata={"sample_id": str(index), "config": "fixture"},
+            metadata={
+                "sample_id": str(index),
+                "config": "fixture",
+                "model_id": "fixture/qwen3-moe",
+                "model_revision": "fixture-sha",
+            },
         )
 
     monkeypatch.setattr(
@@ -184,6 +194,45 @@ def test_fit_qsa_preflights_missing_independent_validation_split(tmp_path: Path,
             output_dir=output_dir,
             layer=0,
             validation_fraction=0.1,
+            allow_cpu=True,
+        )
+    assert not output_dir.exists()
+
+
+def test_fit_qsa_rejects_cache_shard_from_different_base_revision(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    output_dir = tmp_path / "out"
+    cache_dir.mkdir()
+    manifest = {
+        "model_id": "fixture/model",
+        "model_revision": "fixture",
+        "layers": [0],
+        "attention_layers": [0],
+        "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
+        "qsa_config": QSA_CONFIG,
+    }
+    (cache_dir / "cache_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    save_file(
+        {
+            "layer_00_input": torch.randn(6, 8).to(torch.bfloat16).contiguous(),
+            "layer_00_target": torch.randn(6, 8).to(torch.bfloat16).contiguous(),
+            "layer_00_block_mass": torch.rand(6, 3).to(torch.bfloat16).contiguous(),
+        },
+        str(cache_dir / "sample_000000.safetensors"),
+        metadata={
+            "sample_id": "stale",
+            "model_id": "fixture/model",
+            "model_revision": "another-revision",
+        },
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="base ID/revision does not match cache manifest"):
+        fit_qsa_layer(
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            layer=0,
             allow_cpu=True,
         )
     assert not output_dir.exists()

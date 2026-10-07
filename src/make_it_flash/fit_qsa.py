@@ -16,7 +16,7 @@ from safetensors.torch import save_file
 
 from .fit import _split_value
 from .model import make_qsa
-from .provenance import checkpoint_provenance, sha256_file
+from .provenance import checkpoint_provenance, sha256_file, validate_cache_sample_metadata
 
 
 def _qsa_sample(
@@ -148,6 +148,13 @@ def fit_qsa_layer(
     for path in all_paths:
         with safe_open(str(path), framework="pt", device="cpu") as handle:
             keys = set(handle.keys())
+            sample_metadata = handle.metadata()
+        validate_cache_sample_metadata(
+            sample_metadata,
+            path=path,
+            model_id=str(manifest["model_id"]),
+            model_revision=str(manifest["model_revision"]),
+        )
         if f"layer_{layer:02d}_block_mass" not in keys:
             continue
         (validation_paths if validation_fraction and _split_value(path) < threshold else train_paths).append(path)

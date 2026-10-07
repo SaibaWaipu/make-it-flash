@@ -37,6 +37,23 @@ def validate_base_config_provenance(config, model_id: str, revision: str) -> Non
         )
 
 
+def validate_cache_sample_metadata(
+    metadata: dict[str, str] | None,
+    *,
+    path: str | Path,
+    model_id: str,
+    model_revision: str,
+) -> None:
+    if not isinstance(metadata, dict):
+        raise ValueError(f"cache shard {Path(path).name} has no provenance metadata")
+    if metadata.get("model_id") != model_id or metadata.get("model_revision") != model_revision:
+        raise ValueError(
+            f"cache shard {Path(path).name} base ID/revision does not match cache manifest"
+        )
+    if not isinstance(metadata.get("sample_id"), str) or not metadata["sample_id"]:
+        raise ValueError(f"cache shard {Path(path).name} has no sample_id provenance")
+
+
 def _implementation_fingerprint() -> str:
     package_root = Path(__file__).parent
     digest = hashlib.sha256()
