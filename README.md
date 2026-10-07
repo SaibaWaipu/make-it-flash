@@ -100,7 +100,7 @@ HF CLI にログインし、private model repo の作成・書き込み権限が
 
 既定は `a100-large`、timeout 3時間、10K tokens・seq len 1024・1 epoch・最大20 stepsです。runnerは毎回`hf jobs hardware --json`でrateを取得し、timeoutまで動いた場合の最大compute costを計算して、承認budgetを超えるとlaunchを拒否します。現時点のHF CLI表示はA100 80GBが $2.50/時で、3時間上限は約 $7.50（今回承認された上限は合計 $9）です。価格変更時はlive rateで再計算します。ジョブはGDN checkpointとfit metricsのみをprivate repoへuploadし、calibration dataとactivation cacheはuploadしません。**dry-runが既定で、README例をそのまま実行してもジョブは起動しません。**
 
-ジョブは公開Git remoteの`gdn-4.1-pilot`をcloneし、必須の`MIF_GIT_COMMIT`と一致することを確認してから学習します。ジョブ内でsource codeが実行されHF tokenも渡されるため、信頼できるremote/ref/commitを指定してください。
+ジョブは公開Git remoteの`gdn-4.1-pilot`をcloneし、必須の`MIF_GIT_COMMIT`と一致することを確認してから学習します。選択imageにgitがなければaptで追加します。ジョブ内でsource codeが実行されHF tokenも渡されるため、信頼できるremote/ref/commitを指定してください。
 
 ## Kaggle（任意・旧手順）
 

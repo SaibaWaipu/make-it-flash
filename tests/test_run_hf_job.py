@@ -83,3 +83,4 @@ def test_hf_job_runner_launches_only_with_budget_and_required_pins(tmp_path):
     assert "--timeout 3h" in result.stdout
     assert "--detach" in result.stdout
     assert "bash -c" in result.stdout
+    assert "apt-get update" in result.stdout

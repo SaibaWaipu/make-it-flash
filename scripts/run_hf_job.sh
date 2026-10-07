@@ -99,6 +99,14 @@ hf jobs run --detach \
   --env "MIF_MODEL=$MIF_MODEL" \
   --env "MIF_MODEL_REVISION=$MIF_MODEL_REVISION" \
   "$HF_JOB_IMAGE" bash -c 'set -euo pipefail
+  if ! command -v git >/dev/null 2>&1; then
+    if ! command -v apt-get >/dev/null 2>&1; then
+      echo "git and apt-get are unavailable in the selected job image" >&2
+      exit 127
+    fi
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git
+  fi
   git clone --depth 1 --branch "$MIF_GIT_REF" "$MIF_GIT_URL" /workspace/make_it_flash
   cd /workspace/make_it_flash
   source_commit="$(git rev-parse HEAD)"
