@@ -77,6 +77,24 @@ def _evaluation_data_provenance(
     evaluation_dataset = (provenance["dataset_id"], provenance["dataset_revision"], provenance["split"])
     if evaluation_dataset[0] is not None and evaluation_dataset == training_dataset:
         raise ValueError("evaluation dataset/split matches calibration data; use an independent dataset or split")
+    # A different manifest/split name alone cannot prove sample-level independence.
+    # The full-run overlay records a digest set, so evaluation need not retain SFT
+    # training text or depend on an ephemeral job filesystem after upload.
+    digests = training_data.get("token_sha256")
+    if digests is not None:
+        if not isinstance(digests, list) or any(not isinstance(value, str) or len(value) != 64 for value in digests):
+            raise ValueError("invalid calibration token digest set")
+        with source_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                tokens = row.get("input_ids") if isinstance(row, dict) else None
+                if not isinstance(tokens, list) or not tokens:
+                    raise ValueError(f"evaluation corpus lacks input_ids: {source_path}")
+                digest = hashlib.sha256(json.dumps(tokens, separators=(",", ":")).encode()).hexdigest()
+                if digest in digests:
+                    raise ValueError("evaluation and calibration corpora share token sequences; use genuinely held-out data")
     return manifest, provenance
 
 

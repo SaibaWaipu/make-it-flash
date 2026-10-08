@@ -154,6 +154,12 @@ def _validate_fit_metrics(
             raise ValueError(f"QSA layer {layer} needs a positive selector_loss_weight")
         if not math.isfinite(initial_selector) or not math.isfinite(final_selector) or initial_selector <= 0 or final_selector < 0:
             raise ValueError(f"QSA layer {layer} has invalid selector validation losses")
+        initial_mse = float(initial_record.get("mse", float("nan")))
+        final_mse = float(final_record.get("mse", float("nan")))
+        if not math.isfinite(initial_mse) or not math.isfinite(final_mse) or initial_mse < 0 or final_mse < 0:
+            raise ValueError(f"QSA layer {layer} lacks finite independent validation output MSE")
+        if final_mse > initial_mse + max(1e-9, 1e-6 * initial_mse):
+            raise ValueError(f"QSA layer {layer} output MSE degraded despite improving selector/total loss")
         if not math.isclose(final_selector, selected_selector, rel_tol=1e-6, abs_tol=1e-9):
             raise ValueError(f"QSA layer {layer} selected-checkpoint selector metric is inconsistent")
         selector_improvement = (initial_selector - final_selector) / initial_selector
@@ -321,6 +327,8 @@ def assemble_flash_next_overlay(
 
     if gdn_config is None or qsa_config is None:
         raise ValueError("the requested schedule requires at least one fitted GDN and one fitted QSA layer")
+    if observed_calibration_data is None:
+        raise ValueError("overlay lacks calibration-data provenance")
     expected_gdn_config = {
         "linear_key_head_dim": int(getattr(base_config, "head_dim", base_fields["hidden_size"] // base_fields["num_attention_heads"])),
         "linear_value_head_dim": int(getattr(base_config, "head_dim", base_fields["hidden_size"] // base_fields["num_attention_heads"])),

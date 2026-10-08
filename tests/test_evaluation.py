@@ -173,6 +173,18 @@ def test_evaluation_provenance_accepts_different_heldout_split(tmp_path):
     assert provenance["manifest_sha256"] != TRAINING_PROVENANCE["manifest_sha256"]
 
 
+def test_evaluation_rejects_reused_token_sequence_even_with_new_split(tmp_path):
+    import hashlib
+
+    data_file = _write_eval_corpus(tmp_path)
+    reused = [0, 1, 2]
+    digest = hashlib.sha256(json.dumps(reused, separators=(",", ":")).encode()).hexdigest()
+    training = {**TRAINING_PROVENANCE, "token_sha256": [digest]}
+    with pytest.raises(ValueError, match="share token sequences"):
+        _evaluation_data_provenance(data_file, model_id=MODEL_ID,
+                                    model_revision=MODEL_REVISION, calibration_data=training)
+
+
 def test_evaluation_provenance_rejects_same_dataset_split(tmp_path):
     data_file = _write_eval_corpus(tmp_path, split="train")
     training = dict(TRAINING_PROVENANCE)

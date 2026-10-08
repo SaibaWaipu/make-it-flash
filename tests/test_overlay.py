@@ -136,9 +136,9 @@ def _write_fit_artifacts(gdn_dir: Path, qsa_dir: Path):
                     "num_validation_sequences": 2,
                     "validation_uses_train_fallback": False,
                     "selector_loss_weight": 0.1,
-                    "initial_validation": {"total_loss": 1.0, "selection_loss": 1.0},
+                    "initial_validation": {"total_loss": 1.0, "selection_loss": 1.0, "mse": 0.9},
                     "best_validation_total_loss": 0.8,
-                    "final_validation": {"total_loss": 0.8, "selection_loss": 0.8},
+                    "final_validation": {"total_loss": 0.8, "selection_loss": 0.8, "mse": 0.72},
                     "selected_checkpoint_validation_selection_loss": 0.8,
                     "selector_pruning_examples": 3,
                     "selector_pruning_validation_examples": 1,
@@ -332,6 +332,25 @@ def test_overlay_assembly_rejects_untrained_qsa_selector(
         )
 
     assert not overlay_dir.exists()
+
+
+def test_overlay_assembly_rejects_qsa_output_mse_regression_hidden_by_selector(tmp_path):
+    gdn_dir = tmp_path / "gdn-fits"
+    qsa_dir = tmp_path / "qsa-fits"
+    gdn_dir.mkdir()
+    qsa_dir.mkdir()
+    base_config = _write_fit_artifacts(gdn_dir, qsa_dir)
+    path = qsa_dir / "fit_qsa_layer_03.json"
+    metrics = json.loads(path.read_text(encoding="utf-8"))
+    metrics["initial_validation"] = {"mse": 0.1, "selection_loss": 10.0, "total_loss": 1.1}
+    metrics["final_validation"] = {"mse": 0.9, "selection_loss": 0.1, "total_loss": 0.91}
+    metrics["best_validation_total_loss"] = 0.91
+    metrics["selected_checkpoint_validation_selection_loss"] = 0.1
+    path.write_text(json.dumps(metrics), encoding="utf-8")
+    with pytest.raises(ValueError, match="output MSE degraded"):
+        assemble_flash_next_overlay(base_config=base_config, base_model_id=MODEL_ID,
+                                     base_model_revision=MODEL_REVISION, gdn_fit_dir=gdn_dir,
+                                     qsa_fit_dir=qsa_dir, output_dir=tmp_path / "overlay")
 
 
 def test_four_layer_overlay_round_trip_grafts_full_schedule_and_preserves_causal_lm_assets(tmp_path):

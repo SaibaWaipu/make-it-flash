@@ -92,6 +92,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow short-context PPL that does not exercise QSA top-k pruning",
     )
     evaluate.add_argument("--overwrite", action="store_true")
+
+    full_run = commands.add_parser("full-run", help="fit all 24 GDN + 8 QSA layers and assemble an overlay")
+    full_run.add_argument("--data-file", type=Path, required=True)
+    full_run.add_argument("--output-dir", type=Path, required=True)
+    full_run.add_argument("--validation-fraction", type=float, default=0.1)
+    full_run.add_argument("--epochs", type=int, default=3)
+    full_run.add_argument("--max-steps", type=int, default=200)
+    full_run.add_argument("--min-free-gib", type=float, default=66.0)
+    full_run.add_argument("--resume", action="store_true")
+    full_run.add_argument("--dry-run", action="store_true")
+    full_run.add_argument("--allow-cpu", action="store_true", help="tiny fixture tests only")
+
+    staged = commands.add_parser("staged-layer", help="capture and fit one of 32 scheduled layers for incremental publishing")
+    staged.add_argument("--data-file", type=Path, required=True)
+    staged.add_argument("--output-dir", type=Path, required=True)
+    staged.add_argument("--layer", type=int, required=True)
+    staged.add_argument("--validation-fraction", type=float, default=0.1)
+    staged.add_argument("--epochs", type=int, default=3)
+    staged.add_argument("--max-steps", type=int, default=200)
+    staged.add_argument("--min-free-gib", type=float, default=66.0)
+    staged.add_argument("--dry-run", action="store_true")
+    staged.add_argument("--allow-cpu", action="store_true", help="tiny fixture tests only")
     return parser
 
 
@@ -160,6 +182,20 @@ def main(argv: list[str] | None = None) -> int:
             allow_cpu=args.allow_cpu,
             overwrite=args.overwrite,
         )
+    elif args.command == "staged-layer":
+        from .staged import run_staged_layer
+
+        result = run_staged_layer(data_file=args.data_file, output_dir=args.output_dir, layer=args.layer,
+                                  validation_fraction=args.validation_fraction, epochs=args.epochs,
+                                  max_steps=args.max_steps, min_free_gib=args.min_free_gib,
+                                  dry_run=args.dry_run, allow_cpu=args.allow_cpu)
+    elif args.command == "full-run":
+        from .full_run import run_full_conversion
+
+        result = run_full_conversion(data_file=args.data_file, output_dir=args.output_dir,
+                                     validation_fraction=args.validation_fraction, epochs=args.epochs,
+                                     max_steps=args.max_steps, min_free_gib=args.min_free_gib,
+                                     resume=args.resume, dry_run=args.dry_run, allow_cpu=args.allow_cpu)
     elif args.command == "evaluate":
         from .evaluation import evaluate_flash_next
 

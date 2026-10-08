@@ -2,7 +2,7 @@
 
 LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) へ置き換えるための **1 層 pilot** です。データ準備、teacher activation の取得、単独 GDN block の fitting を分離し、小さく検証できるようにしています。
 
-> **実験用コードです。** 生成するのは単独 GDN block と fitting metrics であり、ロード可能な hybrid Causal LM ではありません。
+> **実験用コードです。** 従来の単層pilotに加え、32層すべての局所fitとoverlay組立を順次実行する `full-run` を追加しました。実32Bの全層fit、性能維持、HF Jobでの完走はまだ検証していません。overlayはbaseモデルを別途必要とし、単体でロード可能なmerged Causal LMではありません。
 
 ## Scope
 
@@ -12,7 +12,7 @@ LLM-jp 4.1 32B-A3B thinking を対象に、attention を Gated DeltaNet (GDN) �
 
 1. **prepare** — SFT を streaming で読み、token quota に従って calibration JSONL を作成します。既定値は 100K tokens / sequence 長 2048 です。
 2. **cache** — BF16 teacher の指定 attention 層について、正規化済み入力と attention 出力を保存します。QSA fitting用に、指定した1層だけdense teacher attentionを計算してmicro-blockごとのmassへ集約し、圧縮保存できます。重みを読む前に可視 GPU 全体で空き VRAM 66 GiB 以上を要求します。
-3. **fit / fit-qsa** — GDNはteacher forcingのMSE、QSAは出力MSE＋正のweightを持つteacher attention block-mass selector lossで、それぞれ1層ずつ局所fittingします。QSA selector自体の独立validation lossが改善しない成果はoverlay assemblyが拒否します。全32層を自動変換する処理ではありません。
+3. **fit / fit-qsa** — GDNはteacher forcingのMSE、QSAは出力MSE＋正のweightを持つteacher attention block-mass selector lossで、それぞれ1層ずつ局所fittingします。QSA selectorの独立validation lossが改善しない、または出力MSEが悪化した成果はoverlay assemblyが拒否します。`full-run` はこれを32層に適用しますが、GPU時間と品質は保証しません。
 
 GDN/QSA attention adapterとhybrid cacheをCPU tiny-modelで検証しています。GDN recurrent state・QSA indexer raw-key state・通常KVを持つ `FlashNextDynamicCache` は `create_flash_next_cache` で作成し、QSA/GDN混在時のprefill→incremental decode parityを確認しました。GDN-onlyには `configure_hybrid_cache` も使えます。static/offloaded cacheや最適化済みlong-context kernelは未対応です。
 
@@ -108,6 +108,31 @@ configure_hybrid_cache(model, gdn_layers=[0, 3, 6])
 
 この試作では標準 causal mask と binary padding mask の DynamicCache decode を検証しています。static cache・独自 sparse mask はまだ fail-closed です。
 
+## 全32層の逐次処理（未実機検証）
+
+`make-it-flash full-run` は固定revisionの1つの校正JSONLで train/validation の長文分割をGPU load前に確定し、最初のQSA teacher cache取得時に24 GDN層もまとめてcaptureします。続いて残る7 QSA層を別々にcaptureし、32層の局所fit、厳格な `assemble` を実行します。つまり**teacherを8回ロード**し、QSAでは4096 tokensのdense attentionを各層ごとに作るので、GPU時間・メモリ負荷は大きくなります。`--resume` はローカルの既存cache/fitを検査して続行しますが、HF Jobsのephemeral filesystemをまたいで再開できません。GPUのない環境ではdry-runのみ使ってください。
+
+    make-it-flash prepare --output-dir artifacts/full-data --max-tokens 100000 --max-seq-len 4096
+    make-it-flash full-run --data-file artifacts/full-data/calibration.jsonl --output-dir artifacts/full-run --dry-run
+    make-it-flash full-run --data-file artifacts/full-data/calibration.jsonl --output-dir artifacts/full-run
+
+独立データでの `evaluate` は全層fit後に別途必要です。`full-run` は成功時にoverlayへ校正token列のSHA-256集合を付記し、評価データのtoken列との重複を検知します。古い単層fit由来overlayでSHA集合が無い場合、この追加の重複検査は行われません。公開するのはadapterと検証reportのみとし、原文・teacher activationを出力repoへアップロードしません。局所fitのみではモデル全体の日本語品質維持は証明できず、最適化long-context kernelも未実装です。
+
+HF Jobs向けには [scripts/run_full_hf_job.sh](scripts/run_full_hf_job.sh) を用意しました。**既定はdry-runで、有料ジョブを起動しません。** 既存の単層runnerは変更していません。起動には更新コードを信頼できるGit remoteへpushして40桁commitを固定し、private output repoの現在SHA、今回の追加予算上限（最大$9）を指定する必要があります。開始前に対象repoとsourceを必ず確認してください。ジョブが実行する `prepare → full-run → evaluate → upload` は、独立評価dataset/splitの指定を必須とし（評価なしアップロードは `MIF_ALLOW_UNEVALUATED_UPLOAD=1` を明示）、現時点では32B実機未検証です。timeout到達やOOM、品質ゲート拒否なら完成overlayはありません。Job filesystemは終了時に消えるため途中成果は維持されません。
+
+料金の読み取り専用確認（`hf jobs hardware --json`、2026-10-08）ではA100 80GB `a100-large` が **$2.50/時**。追加上限$9なら理論上3.6時間、余裕を取ってtimeout `3h` なら最大$7.50です。H200 141GBは$5/時（1.8時間）、RTX PRO 6000 96GBは$2.75/時（約3.27時間）。8回の32B teacher load、データ準備、各fit、評価・uploadまでこれに収まる実測根拠はなく、**$9で全層完成できるとの見積もりではありません**。実測の速度と試料数が揃うまではlaunchを推奨しません。
+
+## 層ごとにHF repoへ保存する段階実行（GPU未実施）
+
+32層一括ジョブは失敗時の成果が失われるため、`staged-layer` で**各層を別Jobでteacher capture→fit**し、成功したcheckpointとfit metricsを `staged/<run-id>/layers/<kind>/<layer>/` に一commitで保存する経路を追加しました。32層すべてを個別captureするため**teacher 32回load**となり、一括runnerの8回よりはるかに高コストです。`staged` パスの層成果は未組立・未評価で、モデルとしてロードできません。32件揃ってから `scripts/assemble_staged_hf_artifact.py` で同一base/config/calibration/source/runtimeと品質ゲートを確認してoverlayへ組立て、held-out評価を行ってください。
+
+段階Jobの入力は毎回**同じ固定校正JSONL**でなければなりません。`prepare` のmanifestには作成時刻が入り、毎Job再生成してもSHAが異なります。事前に一度作成・長文train/validationを確認し、利用権と再配布条件を確認したうえで、**別途private dataset repo** に `scripts/publish_calibration_dataset.py` から明示承認で保存してください。calibration JSONLやteacher cacheは出力モデルrepoへは保存しません。段階Jobはそのprivate dataset repoの40桁commitと校正2ファイルのSHAを照合します。SFTデータ由来のtoken列のHubアップロード許諾が確認できない場合はこの段階方式を起動せず、共有してよい独自校正データまたは承認済みprivate bucketの方式を使ってください。
+
+    make-it-flash staged-layer --data-file artifacts/data/calibration.jsonl --output-dir artifacts/staged-layer-03 --layer 3 --dry-run
+    MIF_LAYER=3 MIF_RUN_ID=run-001 bash scripts/run_staged_hf_job.sh  # dry-run only
+
+有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、モデルrepo期待SHA、今回$9枠の*請求確認済み*使用額、1ジョブ上限の入力がすべて必要です。runnerは既定 `a100-large` / `30m`（live時給$2.50なら最大約$1.25/job）。32回を同条件なら**最大$40**で、$9内で全層完成する見積もりではありません。各JobはHF repoの期待親commitを更新してから次を起動し、複数Jobの並走は避けてください。`parent_commit` による競合防止と固定run-id/layer pathの上書き拒否を適用します。今回は有料Jobもcalibration/weightsのHub uploadもまだ行っていません。
+
 ## Base-model overlay assembly
 
 32層分の各fit成果を揃えた後、`assemble` はbase configのrepo ID/commit SHA、各fit checkpointのSHA-256、独立validationでの全体/selector loss改善、QSAのtrain/validation双方でのtop-k pruning実例、全layer共通の校正JSONL/data manifest SHA-256、およびTransformers/package/implementation fingerprintを照合し、3-GDN/1-QSA scheduleのadapter weightsとmanifestだけを一時directoryからatomicにpublishします。LLM-jp本体のweights/tokenizerは複製せず、ロード時に同じ固定revisionのbase modelを別途指定します。
@@ -158,7 +183,7 @@ Launchは個別の明示承認後に限ります。実行時には per-job 上�
 
 ## Validation status
 
-ローカル pytest は81件通過しています。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parityを確認し、2層QSA+GDNのfull/cached decode parityを合成pruning境界（token budget 4、compress ratio 2）越しに検証、prefillとcached next-token双方でtop-k selectorの選択数もassertしました。QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitも検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cache manifestは校正JSONL・data manifestのSHA-256とdataset ID/revisionを保持し、各shard・fit checkpoint/metricsにも伝播します。assembleは全layerが同じ校正data provenanceを使った場合のみ受け入れます。cacheは短いQSA dataならteacher load前に、両fittersは各shardのmodel ID/revision/calibration hashがmanifestと異なる場合にfailします。fit-qsaはさらに独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
+以前のローカル検証ではpytest 81件が通過していました。全層runnerの追加分もCPU合成テストで検証しますが、実32BのGPU動作と完走は未確認です。固定teacher revision `cda260706786758045e5e96bf4d738bbc01155b5` で実データ100 tokens のprepare smoke testを実行し、35/25/15/15/10のmixを確認しました。tiny Qwen3-MoEでGDN cached decode parityを確認し、2層QSA+GDNのfull/cached decode parityを合成pruning境界（token budget 4、compress ratio 2）越しに検証、prefillとcached next-token双方でtop-k selectorの選択数もassertしました。QSA block selection・dense/compact teacher block-mass loss parity・選択的attention capture・QSA local fitも検証しました。4層synthetic `Qwen3MoeForCausalLM` overlayでgraft後の非attention state（MoE/router、embedding、LM head）保持、明示cacheでの `generate` とincremental decode parity、default Transformers cacheのfail-closed動作を確認しました。overlay assemblyはfit loss改善・独立validationでのselector loss・train/validation両方のpruning実例・checkpoint hash/runtime fingerprintも検証します。cache manifestは校正JSONL・data manifestのSHA-256とdataset ID/revisionを保持し、各shard・fit checkpoint/metricsにも伝播します。assembleは全layerが同じ校正data provenanceを使った場合のみ受け入れます。cacheは短いQSA dataならteacher load前に、両fittersは各shardのmodel ID/revision/calibration hashがmanifestと異なる場合にfailします。fit-qsaはさらに独立train/validation例が不足すればoptimizer前にfailします。Gated Residual、compact PLE/ngram、shared expert、MTP prototypesもCPU shape/gradient testsを通過しています。
 
 2026-10-07のA100 large HF pilotは完了しました。32B teacher重みをloadし、固定revisionから10K tokens / max seq 1024でteacher activationを取得、19 train + 2 validation sequencesでlayer 0を19 steps fittingしました。validation MSEは初期 `5.5507e-4` から `4.9177e-4` に低下（約11.4%）。GDN block safetensors（231,835,448 bytes）とmetricsは[private Hub repo](https://huggingface.co/RemydreScarlet/llm-jp-41-gdn-layer0-pilot-2f9031b)に保存されています。これはactivation-fitの単層成果であり、ロード可能なhybrid LM、fitted 24+8 QSA/GDN checkpoint、日本語generation品質/PPLの評価ではありません。
 
