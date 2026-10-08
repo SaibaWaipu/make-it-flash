@@ -114,6 +114,14 @@ def build_parser() -> argparse.ArgumentParser:
     staged.add_argument("--min-free-gib", type=float, default=66.0)
     staged.add_argument("--dry-run", action="store_true")
     staged.add_argument("--allow-cpu", action="store_true", help="tiny fixture tests only")
+
+    cherry = commands.add_parser("cherry-pick", help="prepare fixed English/Japanese/code calibration from LLM-jp 4.1 SFT")
+    cherry.add_argument("--output-dir", type=Path, required=True)
+    cherry.add_argument("--max-tokens", type=int, default=100_000)
+    cherry.add_argument("--max-seq-len", type=int, default=4096)
+    cherry.add_argument("--seed", type=int, default=17)
+    cherry.add_argument("--max-candidates-per-config", type=int, default=1200)
+    cherry.add_argument("--validation-fraction", type=float, default=0.1)
     return parser
 
 
@@ -182,6 +190,13 @@ def main(argv: list[str] | None = None) -> int:
             allow_cpu=args.allow_cpu,
             overwrite=args.overwrite,
         )
+    elif args.command == "cherry-pick":
+        from .cherry_pick import prepare_cherry_picked_calibration
+
+        result = prepare_cherry_picked_calibration(output_dir=args.output_dir, max_tokens=args.max_tokens,
+                                                   max_seq_len=args.max_seq_len, seed=args.seed,
+                                                   max_candidates_per_config=args.max_candidates_per_config,
+                                                   validation_fraction=args.validation_fraction)
     elif args.command == "staged-layer":
         from .staged import run_staged_layer
 

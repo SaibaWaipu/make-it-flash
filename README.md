@@ -124,14 +124,16 @@ HF Jobs向けには [scripts/run_full_hf_job.sh](scripts/run_full_hf_job.sh) を
 
 ## 層ごとにHF repoへ保存する段階実行（GPU未実施）
 
+固定校正データは指定に合わせて日本語 `llmjp_extraction_wiki_ja_v0.3` / 英語 `daring_anteater` / コード `synthetic_jp_en_coding` を40/30/30で選び、100,000 tokens・4096 max sequenceのtokenized JSONLにしました。各カテゴリでstable train/validationそれぞれ最低1件の2052-token長文を予約しています。upstream revisionは `cb4210190af6a0000fd91cb5bb8361ad6d6ade01`、teacherは `cda260706786758045e5e96bf4d738bbc01155b5` です。private校正repo [RemydreScarlet/llm-jp-4.1-flash-next-calibration](https://huggingface.co/datasets/RemydreScarlet/llm-jp-4.1-flash-next-calibration) の固定revisionは `22c44496a7d708bca4986f80f1478e51aebad67a` (private) です。JSONL SHA-256 `aa0500f9d21a4251d9dbf9e7158857cec78f39ae4b902a986c7a5abac6fde706`、manifest SHA-256 `a728725277d56c6d2a7d639d1e4ffb9677bd907474a2e6906bf134096bc4c452`。splitは78 train/8 validation、QSA長文例は13/3 (日本語2・英語7・コード7) です。source全体のライセンスではなく選定configごとの条件を同repo cardに記載しています。
+
 32層一括ジョブは失敗時の成果が失われるため、`staged-layer` で**各層を別Jobでteacher capture→fit**し、成功したcheckpointとfit metricsを `staged/<run-id>/layers/<kind>/<layer>/` に一commitで保存する経路を追加しました。32層すべてを個別captureするため**teacher 32回load**となり、一括runnerの8回よりはるかに高コストです。`staged` パスの層成果は未組立・未評価で、モデルとしてロードできません。32件揃ってから `scripts/assemble_staged_hf_artifact.py` で同一base/config/calibration/source/runtimeと品質ゲートを確認してoverlayへ組立て、held-out評価を行ってください。
 
-段階Jobの入力は毎回**同じ固定校正JSONL**でなければなりません。`prepare` のmanifestには作成時刻が入り、毎Job再生成してもSHAが異なります。事前に一度作成・長文train/validationを確認し、利用権と再配布条件を確認したうえで、**別途private dataset repo** に `scripts/publish_calibration_dataset.py` から明示承認で保存してください。calibration JSONLやteacher cacheは出力モデルrepoへは保存しません。段階Jobはそのprivate dataset repoの40桁commitと校正2ファイルのSHAを照合します。SFTデータ由来のtoken列のHubアップロード許諾が確認できない場合はこの段階方式を起動せず、共有してよい独自校正データまたは承認済みprivate bucketの方式を使ってください。
+段階Jobの入力は毎回**同じ固定校正JSONL**でなければなりません。`prepare` のmanifestには作成時刻が入り、毎Job再生成してもSHAが異なります。今回のtokenized corpusは利用権・private再配布確認後、`scripts/publish_calibration_dataset.py` でprivate dataset repoへ保存し、Hubから固定revisionで再取得してSHAを照合しました。次回corpusを差し替える場合も新しい親commitとデータSHAを固定します。calibration JSONLやteacher cacheは出力モデルrepoへは保存しません。段階Jobはそのprivate dataset repoの40桁commitと校正2ファイルのSHAを照合します。SFTデータ由来のtoken列のHubアップロード許諾が確認できない場合はこの段階方式を起動せず、共有してよい独自校正データまたは承認済みprivate bucketの方式を使ってください。
 
     make-it-flash staged-layer --data-file artifacts/data/calibration.jsonl --output-dir artifacts/staged-layer-03 --layer 3 --dry-run
     MIF_LAYER=3 MIF_RUN_ID=run-001 bash scripts/run_staged_hf_job.sh  # dry-run only
 
-有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、モデルrepo期待SHA、今回$9枠の*請求確認済み*使用額、1ジョブ上限の入力がすべて必要です。runnerは既定 `a100-large` / `30m`（live時給$2.50なら最大約$1.25/job）。32回を同条件なら**最大$40**で、$9内で全層完成する見積もりではありません。各JobはHF repoの期待親commitを更新してから次を起動し、複数Jobの並走は避けてください。`parent_commit` による競合防止と固定run-id/layer pathの上書き拒否を適用します。今回は有料Jobもcalibration/weightsのHub uploadもまだ行っていません。
+有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、モデルrepo期待SHA、今回$9枠の*請求確認済み*使用額、1ジョブ上限の入力がすべて必要です。runnerは既定 `a100-large` / `30m`（live時給$2.50なら最大約$1.25/job）。32回を同条件なら**最大$40**で、$9内で全層完成する見積もりではありません。各JobはHF repoの期待親commitを更新してから次を起動し、複数Jobの並走は避けてください。`parent_commit` による競合防止と固定run-id/layer pathの上書き拒否を適用します。現時点では校正dataをprivate repoへ保存済みですが、有料GPU Jobは未実行で、層checkpoint/weightsもまだHubにありません。
 
 ## Base-model overlay assembly
 
