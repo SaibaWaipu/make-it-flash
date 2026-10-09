@@ -30,7 +30,7 @@ def test_one_progressive_invocation_commits_every_layer_in_order(tmp_path, monke
 
     def fake_publish(**kwargs):
         parents.append(kwargs["expected_repo_sha"])
-        calls.append((kwargs["run_id"], kwargs["layer"], kwargs["expected_source_commit"]))
+        calls.append((kwargs["run_id"], kwargs["layer"], kwargs["expected_source_commit"], kwargs["execution_commit"]))
         return {"new_repo_sha": f"{len(calls):040x}", "record_sha256": "e" * 64}
 
     monkeypatch.setattr(progressive, "publish_staged_layer", fake_publish)
@@ -48,8 +48,9 @@ def test_one_progressive_invocation_commits_every_layer_in_order(tmp_path, monke
         data_file=source, output_dir=tmp_path / "out", run_id="pilot-all",
         expected_repo_sha=PARENT, source_commit=REVISION, api=FakeHub(),
     )
-    assert [layer for _, layer, _ in calls] == list(range(32))
-    assert len({run_id for run_id, _, _ in calls}) == 1
+    assert [layer for _, layer, _, _ in calls] == list(range(32))
+    assert len({run_id for run_id, _, _, _ in calls}) == 1
+    assert all(source == REVISION and execution == REVISION for _, _, source, execution in calls)
     assert parents == [PARENT, *[f"{i:040x}" for i in range(1, 32)]]
     assert result["final_repo_sha"] == f"{32:040x}"
     assert result["completed_layers"] == 32
@@ -68,8 +69,10 @@ def test_progressive_resume_restores_remote_layers_then_publishes_remaining(tmp_
     monkeypatch.setattr(progressive, "_restore_published_layers", lambda **kwargs: [0, 1])
     commits = []
 
+    execution = "f" * 40
+
     def fake_publish(**kwargs):
-        commits.append(kwargs["layer"])
+        commits.append((kwargs["layer"], kwargs["expected_source_commit"], kwargs["execution_commit"]))
         return {"new_repo_sha": f"{len(commits):040x}", "record_sha256": "f" * 64}
 
     monkeypatch.setattr(progressive, "publish_staged_layer", fake_publish)
@@ -84,10 +87,13 @@ def test_progressive_resume_restores_remote_layers_then_publishes_remaining(tmp_
     monkeypatch.setattr(progressive, "run_full_conversion", fake_conversion)
     result = progressive.run_progressive_conversion(
         data_file=source, output_dir=tmp_path / "out", run_id="pilot-all",
-        expected_repo_sha=PARENT, source_commit=REVISION, resume=True, api=FakeHub(),
+        expected_repo_sha=PARENT, source_commit=REVISION, execution_commit=execution,
+        resume=True, api=FakeHub(),
     )
     assert result["restored_layers"] == [0, 1]
-    assert commits == list(range(2, 32))
+    assert [layer for layer, _, _ in commits] == list(range(2, 32))
+    assert all(source == REVISION and executed == execution for _, source, executed in commits)
+    assert result["execution_commit"] == execution
     assert result["completed_layers"] == 32
 
 

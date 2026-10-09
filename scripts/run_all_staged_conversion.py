@@ -59,6 +59,8 @@ def _restore_published_layers(
                 or record.get("metrics_file") != metrics_name
                 or record.get("source_commit") != source_commit):
             raise ValueError(f"remote layer {layer} run/source/artifact provenance mismatch")
+        if record.get("execution_commit") is not None:
+            validate_model_revision(record["execution_commit"])
         if record.get("model_id") != expected["model_id"] or record.get("model_revision") != expected["model_revision"]:
             raise ValueError(f"remote layer {layer} base model provenance mismatch")
         record_calibration = validate_calibration_data_provenance(record.get("calibration_data"))
@@ -97,7 +99,8 @@ def _restore_published_layers(
 
 def run_progressive_conversion(
     *, data_file: str | Path, output_dir: str | Path, run_id: str,
-    expected_repo_sha: str, source_commit: str, epochs: int = 3, max_steps: int = 200,
+    expected_repo_sha: str, source_commit: str, execution_commit: str | None = None,
+    epochs: int = 3, max_steps: int = 200,
     validation_fraction: float = 0.1, min_free_gib: float = 66.0,
     resume: bool = False, dry_run: bool = False, api: HfApi | None = None,
 ) -> dict[str, Any]:
@@ -110,6 +113,8 @@ def run_progressive_conversion(
     artifact_paths(run_id, 0)
     validate_model_revision(expected_repo_sha)
     validate_model_revision(source_commit)
+    execution_commit = execution_commit or source_commit
+    validate_model_revision(execution_commit)
     expected_data = preflight_full_run(data_file, validation_fraction=validation_fraction)
     output = Path(output_dir)
     if Path(data_file).resolve().is_relative_to(output.resolve()):
@@ -121,7 +126,8 @@ def run_progressive_conversion(
             dry_run=True, assemble=False,
         )
         plan.update({"repo_id": OUTPUT_REPO, "initial_repo_sha": expected_repo_sha,
-                     "run_id": run_id, "resume": resume, "layers_to_publish": 32})
+                     "run_id": run_id, "source_commit": source_commit,
+                     "execution_commit": execution_commit, "resume": resume, "layers_to_publish": 32})
         return plan
 
     hub = api if api is not None else HfApi()
@@ -148,7 +154,7 @@ def run_progressive_conversion(
         result = publish_staged_layer(
             fit_dir=fit_dir, run_id=run_id, layer=layer,
             expected_repo_sha=current_repo_sha, expected_source_commit=source_commit,
-            repo_id=OUTPUT_REPO, dry_run=False, api=hub,
+            execution_commit=execution_commit, repo_id=OUTPUT_REPO, dry_run=False, api=hub,
         )
         current_repo_sha = result["new_repo_sha"]
         committed.append({"kind": kind, "layer": layer, "repo_sha": current_repo_sha,
@@ -162,6 +168,7 @@ def run_progressive_conversion(
         on_layer_complete=publish_completed_layer,
     )
     report.update({"initial_repo_sha": expected_repo_sha, "final_repo_sha": current_repo_sha,
+                   "source_commit": source_commit, "execution_commit": execution_commit,
                    "restored_layers": restored, "newly_committed_layers": committed,
                    "completed_layers": len(restored) + len(committed), "assembled": False})
     return report
@@ -173,7 +180,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--expected-repo-sha", required=True)
-    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--source-commit", required=True,
+                        help="run's original fit-source commit; keep it unchanged when resuming")
+    parser.add_argument("--execution-commit", help="actual checkout commit for this execution")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--validation-fraction", type=float, default=0.1)

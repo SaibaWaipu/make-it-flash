@@ -42,7 +42,8 @@ def artifact_paths(run_id: str, layer: int) -> tuple[str, str, str]:
 
 def publish_staged_layer(
     *, fit_dir: str | Path, run_id: str, layer: int, expected_repo_sha: str,
-    expected_source_commit: str, repo_id: str = OUTPUT_REPO, dry_run: bool = True,
+    expected_source_commit: str, execution_commit: str | None = None,
+    repo_id: str = OUTPUT_REPO, dry_run: bool = True,
     api: Any | None = None,
 ) -> dict[str, Any]:
     """Validate and upload one layer in a single CAS-guarded Hub commit."""
@@ -51,6 +52,8 @@ def publish_staged_layer(
         raise ValueError("staged publisher only writes to the approved RemydreScarlet repo")
     validate_model_revision(expected_repo_sha)
     validate_model_revision(expected_source_commit)
+    execution_commit = execution_commit or expected_source_commit
+    validate_model_revision(execution_commit)
     root = Path(fit_dir)
     checkpoint, metrics_file = root / checkpoint_name, root / metrics_name
     if not checkpoint.is_file() or not metrics_file.is_file():
@@ -91,6 +94,7 @@ def publish_staged_layer(
         "checkpoint_file": checkpoint_name, "checkpoint_sha256": checkpoint_hash,
         "metrics_file": metrics_name, "metrics_sha256": metrics_hash,
         "source_commit": expected_source_commit,
+        "execution_commit": execution_commit,
         "runtime_provenance": checkpoint_provenance(),
         "quality": quality,
     }
@@ -128,12 +132,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--expected-repo-sha", required=True)
     parser.add_argument("--expected-source-commit", required=True)
+    parser.add_argument("--execution-commit", help="actual source checkout commit; defaults to expected-source-commit")
     parser.add_argument("--launch", action="store_true", help="actually upload a private Hub commit")
     args = parser.parse_args(argv)
     print(json.dumps(publish_staged_layer(
         fit_dir=args.fit_dir, run_id=args.run_id, layer=args.layer,
         expected_repo_sha=args.expected_repo_sha,
         expected_source_commit=args.expected_source_commit,
+        execution_commit=args.execution_commit,
         dry_run=not args.launch,
     ), indent=2))
     return 0

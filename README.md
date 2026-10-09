@@ -122,18 +122,18 @@ HF Jobs向けには [scripts/run_full_hf_job.sh](scripts/run_full_hf_job.sh) を
 
 料金の読み取り専用確認（`hf jobs hardware --json`、2026-10-08）ではA100 80GB `a100-large` が **$2.50/時**。追加上限$9なら理論上3.6時間、余裕を取ってtimeout `3h` なら最大$7.50です。H200 141GBは$5/時（1.8時間）、RTX PRO 6000 96GBは$2.75/時（約3.27時間）。8回の32B teacher load、データ準備、各fit、評価・uploadまでこれに収まる実測根拠はなく、**$9で全層完成できるとの見積もりではありません**。実測の速度と試料数が揃うまではlaunchを推奨しません。
 
-## 層ごとにHF repoへ保存する段階実行（GPU未実施）
+## 層ごとにHF repoへ保存する段階実行
 
 固定校正データは指定に合わせて日本語 `llmjp_extraction_wiki_ja_v0.3` / 英語 `daring_anteater` / コード `synthetic_jp_en_coding` を40/30/30で選び、100,000 tokens・4096 max sequenceのtokenized JSONLにしました。各カテゴリでstable train/validationそれぞれ最低1件の2052-token長文を予約しています。upstream revisionは `cb4210190af6a0000fd91cb5bb8361ad6d6ade01`、teacherは `cda260706786758045e5e96bf4d738bbc01155b5` です。private校正repo [RemydreScarlet/llm-jp-4.1-flash-next-calibration](https://huggingface.co/datasets/RemydreScarlet/llm-jp-4.1-flash-next-calibration) の固定revisionは `22c44496a7d708bca4986f80f1478e51aebad67a` (private) です。JSONL SHA-256 `aa0500f9d21a4251d9dbf9e7158857cec78f39ae4b902a986c7a5abac6fde706`、manifest SHA-256 `a728725277d56c6d2a7d639d1e4ffb9677bd907474a2e6906bf134096bc4c452`。splitは78 train/8 validation、QSA長文例は13/3 (日本語2・英語7・コード7) です。source全体のライセンスではなく選定configごとの条件を同repo cardに記載しています。
 
-段階保存のメイン入口は [`scripts/run_staged_hf_job.sh`](scripts/run_staged_hf_job.sh)（[`scripts/run_all_staged_hf_job.sh`](scripts/run_all_staged_hf_job.sh)へ委譲）です。**1つのHF Jobの1回の実行で層0〜31を順番にfit**し、fit/品質検証が終わるたびにcheckpoint・metrics・recordをmodel repoへatomic commitしてから次へ進みます。既存の共有capture最適化によりteacher loadは8回（24 GDN + 初回QSAを一度にcapture、その後7 QSA）です。Jobが途中終了してもcommit済み層は残り、同じrun IDと最新repo SHAで `MIF_RESUME=1` とすれば不足分を再開できます。保存先は `staged/<run-id>/layers/...` で、層成果は単独ではロードできず、全32件後に別途組立て・held-out評価が必要です。`staged-layer` コマンドは局所テスト用で、Jobを32回に分割するメイン経路ではありません。
+段階保存のメイン入口は [`scripts/run_staged_hf_job.sh`](scripts/run_staged_hf_job.sh)（[`scripts/run_all_staged_hf_job.sh`](scripts/run_all_staged_hf_job.sh)へ委譲）です。**1つのHF Jobの1回の実行で層0〜31を順番にfit**し、fit/品質検証が終わるたびにcheckpoint・metrics・recordをmodel repoへatomic commitしてから次へ進みます。既存の共有capture最適化によりteacher loadは8回（24 GDN + 初回QSAを一度にcapture、その後7 QSA）です。Jobが途中終了してもcommit済み層は残り、同じrun IDと最新repo SHAで `MIF_RESUME=1` とすれば不足分を再開できます。実行コードを更新して再開する場合は元の `MIF_RUN_SOURCE_COMMIT` を維持し、現在のコードSHAは `execution_commit` に別記します。保存先は `staged/<run-id>/layers/...` で、層成果は単独ではロードできず、全32件後に別途組立て・held-out評価が必要です。`staged-layer` コマンドは局所テスト用で、Jobを32回に分割するメイン経路ではありません。
 
 段階Jobの入力は毎回**同じ固定校正JSONL**でなければなりません。`prepare` のmanifestには作成時刻が入り、毎Job再生成してもSHAが異なります。今回のtokenized corpusは利用権・private再配布確認後、`scripts/publish_calibration_dataset.py` でprivate dataset repoへ保存し、Hubから固定revisionで再取得してSHAを照合しました。次回corpusを差し替える場合も新しい親commitとデータSHAを固定します。calibration JSONLやteacher cacheは出力モデルrepoへは保存しません。段階Jobはそのprivate dataset repoの40桁commitと校正2ファイルのSHAを照合します。SFTデータ由来のtoken列のHubアップロード許諾が確認できない場合はこの段階方式を起動せず、共有してよい独自校正データまたは承認済みprivate bucketの方式を使ってください。
 
     make-it-flash staged-layer --data-file artifacts/data/calibration.jsonl --output-dir artifacts/staged-layer-03 --layer 3 --dry-run
     MIF_RUN_ID=pilot-32 bash scripts/run_staged_hf_job.sh  # 32層を1つのJob内で実行、既定dry-run
 
-有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、model repo初期SHA、予算と請求済み額の入力が必要です。新runner既定は `a100-large` / `3h` で、時給$2.50なら**最大$7.50**。これはtimeoutまでの上限計算で、32層が3時間以内に完了する保証はありません（未実機検証）。途中終了時はその時点までの層commitが残ります。再開時は `MIF_RESUME=1`、同じrun ID、更新後のmodel repo HEADを指定し、別の1 Jobで残りを続けます。GPU実行は未開始です。
+有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、model repo初期SHA、予算と請求済み額の入力が必要です。新runner既定は `a100-large` / `3h` で、時給$2.50なら**最大$7.50**。これはtimeoutまでの上限計算で、32層が3時間以内に完了する保証はありません（未実機検証）。途中終了時はその時点までの層commitが残ります。再開時は `MIF_RESUME=1`、同じrun ID、更新後のmodel repo HEADを指定し、別の1 Jobで残りを続けます。2026-10-09のrun `flashnext-32-run01` は層0〜6を段階保存後、層7用teacher captureのfree VRAM guardで終了しました（キャンセルではありません）。保存された7層は未組立で、単独ではモデルとして利用できません。memory cleanup修正後、同じrun IDから再開します。
 
 ## Base-model overlay assembly
 

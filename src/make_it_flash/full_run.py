@@ -7,6 +7,7 @@ Jobs, upload weights, or claim that the locally fitted model preserves quality.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 from pathlib import Path
@@ -24,6 +25,16 @@ def _split_value(config: str, sample_id: str) -> int:
     import hashlib
 
     return int.from_bytes(hashlib.sha256(f"{config}:{sample_id}".encode()).digest()[:8], "big")
+
+
+def _release_cuda_memory() -> None:
+    """Return model/fit allocations to the driver before the next 32B reload."""
+    gc.collect()
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
 
 def preflight_full_run(
@@ -219,6 +230,9 @@ def run_full_conversion(
             cache_teacher_outputs(data_file=data_file, output_dir=cache_dir, layers=capture_layers,
                                   attention_layers=capture_attention, min_free_gib=min_free_gib,
                                   overwrite=cache_dir.exists())
+            # cache_teacher_outputs drops its model on return, but its CUDA
+            # allocator cache is still reserved until explicitly released here.
+            _release_cuda_memory()
             _verify_cache(cache_dir, expected, kind, layer)
         kwargs = dict(cache_dir=cache_dir, output_dir=fit_dir, layer=layer,
                       epochs=epochs, max_steps=max_steps, validation_fraction=validation_fraction,
@@ -227,6 +241,9 @@ def run_full_conversion(
             fit_one_layer(**kwargs)
         else:
             fit_qsa_layer(**kwargs)
+        # Fit modules/optimizer tensors are out of scope now; release their
+        # cached CUDA blocks before a later layer reloads the 32B teacher.
+        _release_cuda_memory()
         _verify_fit(fit_dir, kind, layer, expected)
         if on_layer_complete is not None:
             if (sha256_file(data_file) != expected["data_sha256"]

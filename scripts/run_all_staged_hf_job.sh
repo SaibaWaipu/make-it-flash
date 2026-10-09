@@ -10,6 +10,7 @@ MIF_RUN_ID="${MIF_RUN_ID:-}"
 MIF_GIT_URL="${MIF_GIT_URL:-https://github.com/SaibaWaipu/make-it-flash.git}"
 MIF_GIT_REF="${MIF_GIT_REF:-gdn-4.1-pilot}"
 MIF_GIT_COMMIT="${MIF_GIT_COMMIT:-}"
+MIF_RUN_SOURCE_COMMIT="${MIF_RUN_SOURCE_COMMIT:-$MIF_GIT_COMMIT}"
 MIF_OUTPUT_REPO="${MIF_OUTPUT_REPO:-RemydreScarlet/llm-jp-4.1-flash-next}"
 MIF_EXPECTED_OUTPUT_REPO_SHA="${MIF_EXPECTED_OUTPUT_REPO_SHA:-}"
 MIF_APPROVED_INCREMENTAL_BUDGET_USD="${MIF_APPROVED_INCREMENTAL_BUDGET_USD:-}"
@@ -57,14 +58,15 @@ echo 'Each fit is validated and atomically committed to the private model repo b
 echo 'Full schedule uses eight teacher captures. A timeout/failure preserves completed commits; remaining layers can resume with the same run ID.'
 if [[ "$MIF_LAUNCH_HF_JOB" == 0 ]]; then echo 'DRY RUN ONLY: no HF Job submitted and no Hub write.'; exit 0; fi
 : "${MIF_GIT_COMMIT:?Pin the uploaded source commit}"
+: "${MIF_RUN_SOURCE_COMMIT:?Pin the original fit-source commit for this run}"
 : "${MIF_EXPECTED_OUTPUT_REPO_SHA:?Pin the current private model repo parent commit}"
 : "${MIF_APPROVED_INCREMENTAL_BUDGET_USD:?Set approved total budget for this single job (maximum $9)}"
 : "${MIF_CONFIRMED_THIS_RUN_SPEND_USD:?Enter confirmed billed spend so far in this run}"
-python - "$MIF_GIT_COMMIT" "$MIF_EXPECTED_OUTPUT_REPO_SHA" "$MIF_CALIBRATION_REVISION" "$MIF_CALIBRATION_DATA_SHA" "$MIF_CALIBRATION_MANIFEST_SHA" "$MIF_APPROVED_INCREMENTAL_BUDGET_USD" "$MIF_CONFIRMED_THIS_RUN_SPEND_USD" "$max_cost" <<'PY'
+python - "$MIF_GIT_COMMIT" "$MIF_RUN_SOURCE_COMMIT" "$MIF_EXPECTED_OUTPUT_REPO_SHA" "$MIF_CALIBRATION_REVISION" "$MIF_CALIBRATION_DATA_SHA" "$MIF_CALIBRATION_MANIFEST_SHA" "$MIF_APPROVED_INCREMENTAL_BUDGET_USD" "$MIF_CONFIRMED_THIS_RUN_SPEND_USD" "$max_cost" <<'PY'
 from decimal import Decimal, InvalidOperation
 import re, sys
-source, output, calibration, data, manifest, budget, spent, maximum = sys.argv[1:]
-if any(re.fullmatch(r'[0-9a-fA-F]{40}', sha) is None for sha in (source, output, calibration)):
+execution, source, output, calibration, data, manifest, budget, spent, maximum = sys.argv[1:]
+if any(re.fullmatch(r'[0-9a-fA-F]{40}', sha) is None for sha in (execution, source, output, calibration)):
     raise SystemExit('source/output/dataset revisions must be pinned 40-character SHAs')
 if any(re.fullmatch(r'[0-9a-f]{64}', sha) is None for sha in (data, manifest)):
     raise SystemExit('calibration digests must be pinned 64-character SHA-256 values')
@@ -87,7 +89,8 @@ PY
 hf jobs run --detach --namespace RemydreScarlet --flavor "$HF_FLAVOR" --timeout "$HF_TIMEOUT" \
   --label "name=flash-next-all-layers-$MIF_RUN_ID" --label "purpose=single-job-progressive-32-layer-fit" \
   --secrets HF_TOKEN --env "MIF_GIT_URL=$MIF_GIT_URL" --env "MIF_GIT_REF=$MIF_GIT_REF" \
-  --env "MIF_GIT_COMMIT=$MIF_GIT_COMMIT" --env "MIF_RUN_ID=$MIF_RUN_ID" \
+  --env "MIF_GIT_COMMIT=$MIF_GIT_COMMIT" --env "MIF_RUN_SOURCE_COMMIT=$MIF_RUN_SOURCE_COMMIT" \
+  --env "MIF_RUN_ID=$MIF_RUN_ID" \
   --env "MIF_EXPECTED_OUTPUT_REPO_SHA=$MIF_EXPECTED_OUTPUT_REPO_SHA" \
   --env "MIF_CALIBRATION_DATA_SHA=$MIF_CALIBRATION_DATA_SHA" \
   --env "MIF_CALIBRATION_MANIFEST_SHA=$MIF_CALIBRATION_MANIFEST_SHA" \
@@ -115,7 +118,8 @@ for name, env in (("calibration.jsonl","MIF_CALIBRATION_DATA_SHA"),("data_manife
 PY
     args=(--data-file artifacts/staged-data/calibration.jsonl --output-dir artifacts/progressive-run
           --run-id "$MIF_RUN_ID" --expected-repo-sha "$MIF_EXPECTED_OUTPUT_REPO_SHA"
-          --source-commit "$MIF_GIT_COMMIT" --epochs "$MIF_FIT_EPOCHS" --max-steps "$MIF_MAX_STEPS"
+          --source-commit "$MIF_RUN_SOURCE_COMMIT" --execution-commit "$MIF_GIT_COMMIT"
+          --epochs "$MIF_FIT_EPOCHS" --max-steps "$MIF_MAX_STEPS"
           --validation-fraction "$MIF_VALIDATION_FRACTION")
     if [[ "$MIF_RESUME" == 1 ]]; then args+=(--resume); fi
     python scripts/run_all_staged_conversion.py "${args[@]}"'

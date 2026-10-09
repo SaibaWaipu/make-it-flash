@@ -27,6 +27,16 @@ def make_data(tmp_path: Path, *, short_validation: bool = False) -> Path:
     return source
 
 
+def test_release_cuda_memory_clears_cached_allocator(monkeypatch):
+    calls = []
+    monkeypatch.setattr(full_run.gc, "collect", lambda: calls.append("gc"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: calls.append("sync"))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+    full_run._release_cuda_memory()
+    assert calls == ["gc", "sync", "empty"]
+
+
 def test_preflight_proves_actual_long_train_validation_split(tmp_path):
     source = make_data(tmp_path)
     result = full_run.preflight_full_run(source)
@@ -97,6 +107,8 @@ def test_full_run_uses_eight_teacher_captures_and_32_fits(tmp_path, monkeypatch)
     monkeypatch.setattr(full_run, "fit_qsa_layer", fit)
     monkeypatch.setattr(full_run, "_verify_cache", lambda *args: None)
     monkeypatch.setattr(full_run, "_verify_fit", lambda *args: None)
+    memory_releases = []
+    monkeypatch.setattr(full_run, "_release_cuda_memory", lambda: memory_releases.append(True))
     def assemble(**kwargs):
         assembled.append(kwargs)
         kwargs["output_dir"].mkdir(parents=True)
@@ -112,6 +124,7 @@ def test_full_run_uses_eight_teacher_captures_and_32_fits(tmp_path, monkeypatch)
                                           on_layer_complete=after_layer)
     assert len(captures) == 8
     assert len(fits) == 32
+    assert len(memory_releases) == len(captures) + len(fits)
     assert [call["layer"] for call in fits] == list(range(32))
     assert set(captures[0]["layers"]) == set(range(32)) - {7, 11, 15, 19, 23, 27, 31}
     assert all(len(call["layers"]) == 1 for call in captures[1:])

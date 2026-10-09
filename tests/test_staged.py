@@ -90,6 +90,9 @@ def test_staged_publisher_uploads_one_atomic_cas_commit(tmp_path):
     assert hub.commits[0]["parent_commit"] == "b" * 40
     assert len(hub.commits[0]["operations"]) == 3
     assert all(op.path_in_repo.startswith("staged/run-001/layers/qsa/03/") for op in hub.commits[0]["operations"])
+    record = json.loads(hub.commits[0]["operations"][2].path_or_fileobj.decode("utf-8"))
+    assert record["source_commit"] == "c" * 40
+    assert record["execution_commit"] == "c" * 40
 
 
 def test_staged_publisher_rejects_existing_layer_path(tmp_path):
