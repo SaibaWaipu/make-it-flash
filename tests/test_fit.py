@@ -3,10 +3,22 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import pytest
+from safetensors import safe_open
 from safetensors.torch import save_file
 
 from make_it_flash.fit import fit_one_layer
 from make_it_flash.model import make_gdn
+from make_it_flash.provenance import checkpoint_provenance, sha256_file
+
+
+CALIBRATION_DATA = {
+    "data_sha256": "a" * 64,
+    "manifest_sha256": "b" * 64,
+    "dataset_id": "fixture/dataset",
+    "dataset_revision": "c" * 40,
+    "split": "fixture",
+}
 
 
 def test_fit_writes_standalone_checkpoint(tmp_path: Path):
@@ -16,6 +28,7 @@ def test_fit_writes_standalone_checkpoint(tmp_path: Path):
     manifest = {
         "model_id": "fixture/model",
         "model_revision": "fixture-sha",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "base_config": {
             "model_type": "qwen3_moe",
@@ -41,7 +54,14 @@ def test_fit_writes_standalone_checkpoint(tmp_path: Path):
                 "layer_00_target": y[0].to(torch.bfloat16).contiguous(),
             },
             str(cache_dir / f"sample_{index:06d}.safetensors"),
-            metadata={"sample_id": str(index), "config": "fixture"},
+            metadata={
+                "sample_id": str(index),
+                "config": "fixture",
+                "model_id": "fixture/model",
+                "model_revision": "fixture-sha",
+                "calibration_data_sha256": CALIBRATION_DATA["data_sha256"],
+                "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
+            },
         )
 
     metrics = fit_one_layer(
@@ -53,9 +73,88 @@ def test_fit_writes_standalone_checkpoint(tmp_path: Path):
         validation_fraction=0,
         allow_cpu=True,
     )
+    checkpoint = output_dir / "gdn_layer_00.safetensors"
     assert metrics["steps"] == 1
-    assert (output_dir / "gdn_layer_00.safetensors").is_file()
+    assert checkpoint.is_file()
     assert (output_dir / "fit_layer_00.json").is_file()
+    with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
+        metadata = handle.metadata()
+    assert all(metadata[key] == value for key, value in checkpoint_provenance().items())
+    assert metrics["checkpoint_sha256"] == sha256_file(checkpoint)
+
+
+def test_fit_rejects_cache_shard_from_different_base_revision(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    output_dir = tmp_path / "fit"
+    cache_dir.mkdir()
+    manifest = {
+        "model_id": "fixture/model",
+        "model_revision": "fixture-sha",
+        "calibration_data": CALIBRATION_DATA,
+        "layers": [0],
+        "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
+        "gdn_config": {"linear_num_key_heads": 1, "linear_num_value_heads": 1},
+    }
+    (cache_dir / "cache_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    save_file(
+        {
+            "layer_00_input": torch.randn(2, 8).to(torch.bfloat16).contiguous(),
+            "layer_00_target": torch.randn(2, 8).to(torch.bfloat16).contiguous(),
+        },
+        str(cache_dir / "sample_000000.safetensors"),
+        metadata={
+            "sample_id": "stale",
+            "model_id": "fixture/model",
+            "model_revision": "another-revision",
+            "calibration_data_sha256": CALIBRATION_DATA["data_sha256"],
+            "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="base ID/revision does not match cache manifest"):
+        fit_one_layer(
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            layer=0,
+            allow_cpu=True,
+        )
+    assert not (output_dir / "gdn_layer_00.safetensors").exists()
+
+
+def test_fit_rejects_cache_shard_from_different_calibration_data(tmp_path: Path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    manifest = {
+        "model_id": "fixture/model",
+        "model_revision": "fixture-sha",
+        "calibration_data": CALIBRATION_DATA,
+        "layers": [0],
+        "base_config": {"model_type": "qwen3_moe", "hidden_size": 8},
+        "gdn_config": {"linear_num_key_heads": 1, "linear_num_value_heads": 1},
+    }
+    (cache_dir / "cache_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    save_file(
+        {
+            "layer_00_input": torch.randn(2, 8).to(torch.bfloat16).contiguous(),
+            "layer_00_target": torch.randn(2, 8).to(torch.bfloat16).contiguous(),
+        },
+        str(cache_dir / "sample_000000.safetensors"),
+        metadata={
+            "sample_id": "mixed-data",
+            "model_id": "fixture/model",
+            "model_revision": "fixture-sha",
+            "calibration_data_sha256": "9" * 64,
+            "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="calibration provenance does not match cache manifest"):
+        fit_one_layer(
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "fit",
+            layer=0,
+            allow_cpu=True,
+        )
 
 
 def test_fit_one_step_at_llm_jp_41_width(tmp_path: Path):
@@ -65,6 +164,7 @@ def test_fit_one_step_at_llm_jp_41_width(tmp_path: Path):
     manifest = {
         "model_id": "llm-jp/llm-jp-4.1-32b-a3b-thinking",
         "model_revision": "cda260706786758045e5e96bf4d738bbc01155b5",
+        "calibration_data": CALIBRATION_DATA,
         "layers": [0],
         "base_config": {
             "model_type": "qwen3_moe",
@@ -85,7 +185,14 @@ def test_fit_one_step_at_llm_jp_41_width(tmp_path: Path):
             "layer_00_target": torch.randn(2, 2560).to(torch.bfloat16).contiguous(),
         },
         str(cache_dir / "sample_000000.safetensors"),
-        metadata={"sample_id": "synthetic-4.1-width", "config": "synthetic"},
+        metadata={
+            "sample_id": "synthetic-4.1-width",
+            "config": "synthetic",
+            "model_id": "llm-jp/llm-jp-4.1-32b-a3b-thinking",
+            "model_revision": "cda260706786758045e5e96bf4d738bbc01155b5",
+            "calibration_data_sha256": CALIBRATION_DATA["data_sha256"],
+            "data_manifest_sha256": CALIBRATION_DATA["manifest_sha256"],
+        },
     )
 
     metrics = fit_one_layer(

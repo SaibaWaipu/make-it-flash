@@ -5,15 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "make-it-flash"
 version = "0.1.0"
-description = "Streaming calibration, teacher activation caching, and local GDN alignment for LLM-jp Qwen3-MoE"
+description = "Streaming calibration, QSA/GDN teacher fitting, and adapter overlays for LLM-jp Qwen3-MoE"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
   "torch>=2.5",
-  "transformers>=4.57.0,<6.0",
-  "datasets>=3.0",
-  "huggingface_hub>=0.34",
+  "transformers>=5.5,<5.6",
+  "datasets>=4.3,<5.0",
+  "huggingface_hub>=1.21,<1.22",
   "accelerate>=1.0",
   "safetensors>=0.4",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,11 @@ import torch
 from safetensors.torch import save_file
 
 from .model import get_decoder_layers, make_gdn_config
+from .provenance import (
+    sha256_file,
+    validate_base_config_provenance,
+    validate_model_revision,
+)
 
 
 def _read_jsonl(path: Path):
@@ -21,6 +27,43 @@ def _read_jsonl(path: Path):
                 yield json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid JSON at {path}:{line_number}") from exc
+
+
+QSA_TOKEN_BUDGET = 2048
+QSA_COMPRESS_RATIO = 4
+
+
+def _prune_stale_cache_shards(output_dir: Path, emitted: int) -> None:
+    expected = {f"sample_{index:06d}.safetensors" for index in range(emitted)}
+    for path in output_dir.glob("sample_*.safetensors"):
+        if path.name not in expected:
+            path.unlink()
+
+
+def _count_qsa_pruning_candidates(
+    data_file: str | Path,
+    *,
+    max_examples: int | None,
+) -> dict[str, int]:
+    required_length = (QSA_TOKEN_BUDGET // QSA_COMPRESS_RATIO + 1) * QSA_COMPRESS_RATIO
+    examples = pruning_examples = max_sequence_length = 0
+    for row in _read_jsonl(Path(data_file)):
+        ids = row.get("input_ids")
+        if not isinstance(ids, list) or not ids:
+            continue
+        examples += 1
+        sequence_length = len(ids)
+        max_sequence_length = max(max_sequence_length, sequence_length)
+        if sequence_length >= required_length:
+            pruning_examples += 1
+        if max_examples is not None and examples >= max_examples:
+            break
+    return {
+        "required_sequence_length": required_length,
+        "examples_scanned": examples,
+        "pruning_examples": pruning_examples,
+        "max_sequence_length": max_sequence_length,
+    }
 
 
 def _check_gpu_memory(min_free_gib: float) -> None:
@@ -37,11 +80,116 @@ def _check_gpu_memory(min_free_gib: float) -> None:
         )
 
 
+def _capture_local_attention(
+    model: Any,
+    input_ids: torch.Tensor,
+    layers: tuple[int, ...],
+    attention_layers: tuple[int, ...],
+    compress_ratio: int = 4,
+) -> dict[int, dict[str, torch.Tensor]]:
+    """Capture local targets and compact teacher mass for complete micro-blocks."""
+    if compress_ratio <= 0:
+        raise ValueError("compress_ratio must be positive")
+    decoder_layers = get_decoder_layers(model)
+    attention_set = set(attention_layers)
+    if not attention_set.issubset(layers):
+        raise ValueError("attention_layers must be a subset of the cached layers")
+    captures: dict[int, dict[str, torch.Tensor]] = {index: {} for index in layers}
+    hooks = []
+    original_forwards: dict[int, Any] = {}
+    model_config = getattr(model, "config", None)
+    original_implementation = getattr(model_config, "_attn_implementation", "sdpa") or "sdpa"
+    try:
+        for index in layers:
+            attention = decoder_layers[index].self_attn
+
+            def pre_hook(module, args, kwargs, layer_index=index):
+                hidden = kwargs.get("hidden_states")
+                if hidden is None and args:
+                    hidden = args[0]
+                if hidden is None:
+                    raise RuntimeError(f"could not read layer {layer_index} attention input")
+                captures[layer_index]["input"] = hidden.detach()[0].to(
+                    device="cpu", dtype=torch.bfloat16
+                ).contiguous()
+
+            def post_hook(module, args, output, layer_index=index):
+                if not isinstance(output, (tuple, list)) or not output:
+                    raise RuntimeError(f"unexpected attention output at layer {layer_index}")
+                result = output[0]
+                if not isinstance(result, torch.Tensor):
+                    raise RuntimeError(f"unexpected attention output type at layer {layer_index}")
+                captures[layer_index]["target"] = result.detach()[0].to(
+                    device="cpu", dtype=torch.bfloat16
+                ).contiguous()
+                if layer_index in attention_set:
+                    if len(output) < 2 or not isinstance(output[1], torch.Tensor):
+                        raise RuntimeError(f"attention weights were not returned for layer {layer_index}")
+                    weights = output[1].detach()[0]
+                    seq_len, key_len = weights.shape[-2:]
+                    if seq_len != key_len:
+                        raise RuntimeError("teacher attention map must be square for unpadded calibration sequences")
+                    num_blocks = key_len // compress_ratio
+                    if num_blocks:
+                        head_summed = weights.sum(dim=0, dtype=torch.float32)
+                        block_mass = head_summed[:, : num_blocks * compress_ratio]
+                        block_mass = block_mass.view(seq_len, num_blocks, compress_ratio).sum(dim=-1)
+                    else:
+                        block_mass = torch.empty((seq_len, 0), dtype=torch.float32, device=weights.device)
+                    captures[layer_index]["block_mass"] = block_mass.to(
+                        device="cpu", dtype=torch.bfloat16
+                    ).contiguous()
+
+            hooks.append(attention.register_forward_pre_hook(pre_hook, with_kwargs=True))
+            hooks.append(attention.register_forward_hook(post_hook))
+        if attention_set:
+            # Eager mask construction is needed because SDPA may express causality
+            # with is_causal=True and pass no explicit mask to the local module.
+            # Keep non-target layers on SDPA while the target emits its probabilities.
+            model_config._attn_implementation = "eager"
+            for index, decoder_layer in enumerate(decoder_layers):
+                attention = decoder_layer.self_attn
+                original_forward = attention.forward
+                config = attention.config
+                layer_is_target = index in attention_set
+
+                def layer_forward(
+                    *args,
+                    _forward=original_forward,
+                    _config=config,
+                    _target=layer_is_target,
+                    **kwargs,
+                ):
+                    previous_implementation = getattr(_config, "_attn_implementation", original_implementation)
+                    _config._attn_implementation = "eager" if _target else original_implementation
+                    if _target:
+                        kwargs["output_attentions"] = True
+                    try:
+                        return _forward(*args, **kwargs)
+                    finally:
+                        _config._attn_implementation = previous_implementation
+
+                original_forwards[index] = original_forward
+                attention.forward = layer_forward
+
+        with torch.inference_mode():
+            model(input_ids=input_ids, use_cache=False, output_attentions=False)
+    finally:
+        for hook in hooks:
+            hook.remove()
+        for index, original_forward in original_forwards.items():
+            decoder_layers[index].self_attn.forward = original_forward
+        if attention_set and model_config is not None:
+            model_config._attn_implementation = original_implementation
+    return captures
+
+
 def cache_teacher_outputs(
     *,
     data_file: str | Path,
     output_dir: str | Path,
     layers: list[int] | tuple[int, ...] = (0,),
+    attention_layers: list[int] | tuple[int, ...] = (),
     max_examples: int | None = None,
     min_free_gib: float = 66.0,
     overwrite: bool = False,
@@ -56,20 +204,63 @@ def cache_teacher_outputs(
     data_manifest_path = source_path.with_name("data_manifest.json")
     if not source_path.is_file() or not data_manifest_path.is_file():
         raise FileNotFoundError("data_file and its adjacent data_manifest.json are required")
-    data_manifest = json.loads(data_manifest_path.read_text(encoding="utf-8"))
+    data_manifest_bytes = data_manifest_path.read_bytes()
+    data_manifest = json.loads(data_manifest_bytes.decode("utf-8"))
+    data_manifest_sha256 = hashlib.sha256(data_manifest_bytes).hexdigest()
+    declared_data_file = data_manifest.get("data_file")
+    if declared_data_file is not None and declared_data_file != source_path.name:
+        raise ValueError("data_manifest.json data_file does not match the requested calibration JSONL")
     model_id = data_manifest["model_id"]
     revision = data_manifest.get("model_revision", "main")
+    validate_model_revision(revision)
+    selected = tuple(sorted(set(int(index) for index in layers)))
+    attention_selected = tuple(sorted(set(int(index) for index in attention_layers)))
+    if not selected:
+        raise ValueError("layers must not be empty")
+    if not set(attention_selected).issubset(selected):
+        raise ValueError("attention_layers must be included in layers")
+    if len(attention_selected) > 1:
+        raise ValueError("capture one dense teacher attention layer at a time to bound memory")
+    calibration_data = {
+        "data_sha256": sha256_file(source_path),
+        "manifest_sha256": data_manifest_sha256,
+        "dataset_id": data_manifest.get("dataset_id"),
+        "dataset_revision": data_manifest.get("dataset_revision"),
+        "split": data_manifest.get("split"),
+        "seed": data_manifest.get("seed"),
+        "target_tokens": data_manifest.get("target_tokens"),
+        "actual_tokens": data_manifest.get("actual_tokens"),
+    }
+    if attention_selected:
+        pruning_evidence = _count_qsa_pruning_candidates(source_path, max_examples=max_examples)
+        if pruning_evidence["pruning_examples"] < 2:
+            raise ValueError(
+                f"QSA teacher capture needs at least two sequences of "
+                f"{pruning_evidence['required_sequence_length']} tokens for separate train/validation pruning; "
+                f"found {pruning_evidence['pruning_examples']} qualifying examples "
+                f"(max length {pruning_evidence['max_sequence_length']}). Prepare longer/more data before loading weights."
+            )
+    if (
+        sha256_file(source_path) != calibration_data["data_sha256"]
+        or sha256_file(data_manifest_path) != calibration_data["manifest_sha256"]
+    ):
+        raise RuntimeError("calibration data changed during QSA preflight; refusing to continue")
 
     target_dir = Path(output_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
     marker = target_dir / "cache_manifest.json"
     if not overwrite and (marker.exists() or any(target_dir.glob("*.safetensors"))):
         raise FileExistsError(f"cache output already exists under {target_dir}; pass --overwrite")
 
-    _check_gpu_memory(min_free_gib)
     config = AutoConfig.from_pretrained(model_id, revision=revision, trust_remote_code=False)
+    validate_base_config_provenance(config, model_id, revision)
     if getattr(config, "model_type", None) != "qwen3_moe":
         raise ValueError(f"expected a qwen3_moe base model, got {getattr(config, 'model_type', None)!r}")
+    layer_count = int(config.num_hidden_layers)
+    if min(selected) < 0 or max(selected) >= layer_count:
+        raise ValueError(f"layer indices must be in [0, {layer_count - 1}]")
+    _check_gpu_memory(min_free_gib)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         revision=revision,
@@ -81,39 +272,19 @@ def cache_teacher_outputs(
     )
     model.eval()
     decoder_layers = get_decoder_layers(model)
-    selected = tuple(sorted(set(int(index) for index in layers)))
-    if not selected or min(selected) < 0 or max(selected) >= len(decoder_layers):
-        raise ValueError(f"layer indices must be in [0, {len(decoder_layers) - 1}]")
+    if len(decoder_layers) != layer_count:
+        raise RuntimeError("loaded model layer count differs from AutoConfig")
     for index in selected:
         if not hasattr(decoder_layers[index], "self_attn"):
             raise ValueError(f"layer {index} has no self_attn module")
 
     gdn_config = make_gdn_config(config)
-    captures: dict[int, dict[str, torch.Tensor]] = {index: {} for index in selected}
-    hooks = []
-    for index in selected:
-        attention = decoder_layers[index].self_attn
-
-        def pre_hook(module, args, kwargs, layer_index=index):
-            hidden = kwargs.get("hidden_states")
-            if hidden is None and args:
-                hidden = args[0]
-            if hidden is None:
-                raise RuntimeError(f"could not read layer {layer_index} attention input")
-            captures[layer_index]["input"] = hidden.detach()[0].to(device="cpu", dtype=torch.bfloat16).contiguous()
-
-        def post_hook(module, args, output, layer_index=index):
-            result = output[0] if isinstance(output, (tuple, list)) else output
-            if not isinstance(result, torch.Tensor):
-                raise RuntimeError(f"unexpected attention output type at layer {layer_index}")
-            captures[layer_index]["target"] = result.detach()[0].to(device="cpu", dtype=torch.bfloat16).contiguous()
-
-        hooks.append(attention.register_forward_pre_hook(pre_hook, with_kwargs=True))
-        hooks.append(attention.register_forward_hook(post_hook))
-
     embedding_device = model.get_input_embeddings().weight.device
     emitted = 0
     token_count = 0
+    if overwrite:
+        # Any subsequent shard write makes the old manifest describe a mixed cache.
+        marker.unlink(missing_ok=True)
     try:
         with torch.inference_mode():
             for row in _read_jsonl(source_path):
@@ -123,9 +294,7 @@ def cache_teacher_outputs(
                 if len(ids) > int(getattr(config, "max_position_embeddings", len(ids))):
                     raise ValueError(f"sample {row.get('sample_id')} exceeds model position limit")
                 input_ids = torch.tensor([ids], dtype=torch.long, device=embedding_device)
-                for layer in selected:
-                    captures[layer].clear()
-                model(input_ids=input_ids, use_cache=False, output_attentions=False)
+                captures = _capture_local_attention(model, input_ids, selected, attention_selected)
                 tensors: dict[str, torch.Tensor] = {
                     "input_ids": input_ids[0].detach().to(device="cpu", dtype=torch.int32).contiguous()
                 }
@@ -135,12 +304,18 @@ def cache_teacher_outputs(
                         raise RuntimeError(f"attention hook did not capture layer {layer}")
                     tensors[f"layer_{layer:02d}_input"] = capture["input"]
                     tensors[f"layer_{layer:02d}_target"] = capture["target"]
+                    if layer in attention_selected:
+                        if "block_mass" not in capture:
+                            raise RuntimeError(f"attention hook did not capture block masses for layer {layer}")
+                        tensors[f"layer_{layer:02d}_block_mass"] = capture["block_mass"]
                 metadata = {
                     "sample_id": str(row.get("sample_id", emitted)),
                     "category": str(row.get("category", "unknown")),
                     "config": str(row.get("config", "unknown")),
                     "model_id": model_id,
                     "model_revision": revision,
+                    "calibration_data_sha256": calibration_data["data_sha256"],
+                    "data_manifest_sha256": calibration_data["manifest_sha256"],
                 }
                 save_file(tensors, str(target_dir / f"sample_{emitted:06d}.safetensors"), metadata=metadata)
                 emitted += 1
@@ -148,11 +323,16 @@ def cache_teacher_outputs(
                 if max_examples is not None and emitted >= max_examples:
                     break
     finally:
-        for hook in hooks:
-            hook.remove()
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    if (
+        sha256_file(source_path) != calibration_data["data_sha256"]
+        or sha256_file(data_manifest_path) != calibration_data["manifest_sha256"]
+    ):
+        raise RuntimeError("calibration data or data manifest changed during teacher capture; refusing to publish")
+    if emitted == 0:
+        raise ValueError("teacher cache capture produced no usable examples; refusing to publish an empty cache")
 
     base_fields = {
         "model_type": config.model_type,
@@ -171,17 +351,32 @@ def cache_teacher_outputs(
         "linear_num_value_heads": int(gdn_config.linear_num_value_heads),
         "linear_conv_kernel_dim": int(gdn_config.linear_conv_kernel_dim),
     }
+    qsa_fields = {
+        "num_heads": 24,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "rotary_dim": 64,
+        "rope_theta": 10_000_000.0,
+        "index_n_heads": 4,
+        "index_head_dim": 128,
+        "token_budget": QSA_TOKEN_BUDGET,
+        "compress_ratio": QSA_COMPRESS_RATIO,
+    }
     manifest = {
         "model_id": model_id,
         "model_revision": revision,
         "data_file": str(source_path),
+        "calibration_data": calibration_data,
         "layers": list(selected),
+        "attention_layers": list(attention_selected),
         "num_examples": emitted,
         "num_tokens": token_count,
         "storage_dtype": "bfloat16",
         "base_config": base_fields,
         "gdn_config": gdn_fields,
-        "note": "cache contains one teacher-forced local attention input/output pair per sequence; it is not a merged hybrid checkpoint",
+        "qsa_config": qsa_fields,
+        "note": "cache contains teacher-forced local attention input/output pairs; optional teacher attention is reduced to complete micro-block masses for attention_layers; this is not a merged hybrid checkpoint",
     }
+    _prune_stale_cache_shards(target_dir, emitted)
     marker.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
