@@ -35,6 +35,28 @@ def test_gdn_shapes_match_hidden_size():
     assert result.shape == (1, 8, 64)
 
 
+def test_make_gdn_avoids_cuda_only_fused_norm_constructor(monkeypatch):
+    import transformers.models.qwen3_next.modeling_qwen3_next as qwen3_next
+
+    def forbidden_fused_norm(*args, **kwargs):
+        raise AssertionError("the fitted GDN replaces this norm and must not require CUDA")
+
+    monkeypatch.setattr(qwen3_next, "FusedRMSNormGated", forbidden_fused_norm)
+    config = SimpleNamespace(
+        model_type="qwen3_moe",
+        hidden_size=64,
+        vocab_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        head_dim=16,
+        intermediate_size=128,
+        rms_norm_eps=1e-6,
+    )
+    gdn = make_gdn(config, 0, key_heads=4, value_heads=8)
+    assert isinstance(gdn.norm, _SigmoidRMSNormGated)
+    assert qwen3_next.FusedRMSNormGated is forbidden_fused_norm
+
+
 def test_flash_next_schedule_matches_reference_3_to_1_ratio():
     gdn_layers, qsa_layers = flash_next_attention_schedule(32)
     assert len(gdn_layers) == 24

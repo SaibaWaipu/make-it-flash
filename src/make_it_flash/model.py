@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from typing import Any
+import threading
 
 import torch
 from torch import nn
+
+
+_QWEN3_NEXT_GDN_INIT_LOCK = threading.RLock()
 
 
 class _SigmoidRMSNormGated(nn.Module):
@@ -78,11 +82,23 @@ def make_gdn_config(base_config: Any, *, key_heads: int | None = None, value_hea
 
 
 def make_gdn(base_config: Any, layer_idx: int, *, key_heads: int | None = None, value_heads: int | None = None) -> Any:
-    """Instantiate a Transformers Qwen3-Next GDN module for one teacher layer."""
-    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextGatedDeltaNet
+    """Instantiate a Transformers Qwen3-Next GDN module for one teacher layer.
+
+    The fused Qwen3-Next RMSNorm constructor hard-codes ``torch.cuda.current_device``.
+    Flash-Next immediately replaces that norm with its own gate, so temporarily
+    select the reference PyTorch norm while building the module. This keeps remote
+    model construction usable on CPU and meta-device loading hosts as well.
+    """
+    from transformers.models.qwen3_next import modeling_qwen3_next
 
     config = make_gdn_config(base_config, key_heads=key_heads, value_heads=value_heads)
-    gdn = Qwen3NextGatedDeltaNet(config, layer_idx)
+    with _QWEN3_NEXT_GDN_INIT_LOCK:
+        fused_norm = modeling_qwen3_next.FusedRMSNormGated
+        modeling_qwen3_next.FusedRMSNormGated = None
+        try:
+            gdn = modeling_qwen3_next.Qwen3NextGatedDeltaNet(config, layer_idx)
+        finally:
+            modeling_qwen3_next.FusedRMSNormGated = fused_norm
     # Qwen3.8-Flash-Next separates the GDN output gate from the SiLU conv activation.
     gdn.norm = _SigmoidRMSNormGated(gdn.head_v_dim, eps=gdn.layer_norm_epsilon)
     return gdn
@@ -190,14 +206,19 @@ def create_flash_next_cache(
     if getattr(decoder_config, "model_type", None) != "qwen3_moe":
         raise ValueError(f"unsupported cache model_type: {getattr(decoder_config, 'model_type', None)!r}")
     gdn_set, qsa_set = set(gdn), set(qsa)
-    layer_types = [
+    cache_layer_types = [
         "linear_attention" if idx in gdn_set else "indexed_attention" if idx in qsa_set else "full_attention"
         for idx in range(layer_count)
     ]
-    decoder_config.layer_types = layer_types
+    # Keep the serialized config within Transformers' recognized layer types;
+    # QSA's indexed cache kind lives in the custom cache, not the base config.
+    decoder_config.layer_types = [
+        "linear_attention" if idx in gdn_set else "full_attention"
+        for idx in range(layer_count)
+    ]
     from .hybrid_cache import FlashNextDynamicCache
 
-    return FlashNextDynamicCache(layer_types)
+    return FlashNextDynamicCache(cache_layer_types)
 
 
 def configure_hybrid_cache(model: Any, gdn_layers: list[int] | tuple[int, ...]) -> list[str]:
