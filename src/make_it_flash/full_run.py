@@ -10,10 +10,12 @@ import argparse
 import gc
 import json
 import math
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from .cache import QSA_COMPRESS_RATIO, QSA_TOKEN_BUDGET, cache_teacher_outputs
+from .cache import QSA_COMPRESS_RATIO, QSA_TOKEN_BUDGET
 from .fit import fit_one_layer
 from .fit_qsa import fit_qsa_layer
 from .model import flash_next_attention_schedule
@@ -35,6 +37,36 @@ def _release_cuda_memory() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+
+
+def _capture_teacher_outputs_isolated(
+    *,
+    data_file: str | Path,
+    output_dir: str | Path,
+    layers: tuple[int, ...],
+    attention_layers: tuple[int, ...],
+    min_free_gib: float,
+    overwrite: bool,
+) -> None:
+    """Capture in a short-lived process so its CUDA context cannot leak."""
+    command = [
+        sys.executable,
+        "-m",
+        "make_it_flash.cache_worker",
+        "--data-file",
+        str(data_file),
+        "--output-dir",
+        str(output_dir),
+        "--layers",
+        *(str(layer) for layer in layers),
+        "--attention-layers",
+        *(str(layer) for layer in attention_layers),
+        "--min-free-gib",
+        str(min_free_gib),
+    ]
+    if overwrite:
+        command.append("--overwrite")
+    subprocess.run(command, check=True)
 
 
 def preflight_full_run(
@@ -227,11 +259,16 @@ def run_full_conversion(
         else:
             capture_layers = (*gdn, qsa[0]) if kind == "gdn" or layer == qsa[0] else (layer,)
             capture_attention = (qsa[0],) if kind == "gdn" else (layer,)
-            cache_teacher_outputs(data_file=data_file, output_dir=cache_dir, layers=capture_layers,
-                                  attention_layers=capture_attention, min_free_gib=min_free_gib,
-                                  overwrite=cache_dir.exists())
-            # cache_teacher_outputs drops its model on return, but its CUDA
-            # allocator cache is still reserved until explicitly released here.
+            _capture_teacher_outputs_isolated(
+                data_file=data_file,
+                output_dir=cache_dir,
+                layers=capture_layers,
+                attention_layers=capture_attention,
+                min_free_gib=min_free_gib,
+                overwrite=cache_dir.exists(),
+            )
+            # The worker process has exited; also clear the parent allocator
+            # before the next layer fit or teacher reload.
             _release_cuda_memory()
             _verify_cache(cache_dir, expected, kind, layer)
         kwargs = dict(cache_dir=cache_dir, output_dir=fit_dir, layer=layer,

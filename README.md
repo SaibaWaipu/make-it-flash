@@ -133,7 +133,7 @@ HF Jobs向けには [scripts/run_full_hf_job.sh](scripts/run_full_hf_job.sh) を
     make-it-flash staged-layer --data-file artifacts/data/calibration.jsonl --output-dir artifacts/staged-layer-03 --layer 3 --dry-run
     MIF_RUN_ID=pilot-32 bash scripts/run_staged_hf_job.sh  # 32層を1つのJob内で実行、既定dry-run
 
-有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、model repo初期SHA、予算と請求済み額の入力が必要です。新runner既定は `a100-large` / `3h` で、時給$2.50なら**最大$7.50**。これはtimeoutまでの上限計算で、32層が3時間以内に完了する保証はありません（未実機検証）。途中終了時はその時点までの層commitが残ります。再開時は `MIF_RESUME=1`、同じrun ID、更新後のmodel repo HEADを指定し、別の1 Jobで残りを続けます。2026-10-09のrun `flashnext-32-run01` は層0〜6を段階保存後、層7用teacher captureのfree VRAM guardで終了しました（キャンセルではありません）。保存された7層は未組立で、単独ではモデルとして利用できません。memory cleanup修正後、同じrun IDから再開します。
+有料実行は `MIF_LAUNCH_HF_JOB=1`、レビュー済みGit commit、private校正repo SHA、校正JSONL/manifest SHA、model repo初期SHA、予算と請求済み額の入力が必要です。新runner既定は `a100-large` / `3h` で、時給$2.50なら**最大$7.50**。これはtimeoutまでの上限計算で、32層が3時間以内に完了する保証はありません（未実機検証）。途中終了時はその時点までの層commitが残ります。再開時は `MIF_RESUME=1`、同じrun ID、更新後のmodel repo HEADを指定し、別の1 Jobで残りを続けます。2026-10-09のrun `flashnext-32-run01` は層0〜7を段階保存しましたが、その後のteacher captureでfree VRAM guardにより2回自動終了しました（キャンセルではありません）。保存された8層は未組立で、単独ではモデルとして利用できません。次の再開ではteacher captureを短命な子プロセスに隔離し、終了時にCUDA contextごと解放します。
 
 ## Base-model overlay assembly
 

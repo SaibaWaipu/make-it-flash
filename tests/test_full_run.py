@@ -37,6 +37,25 @@ def test_release_cuda_memory_clears_cached_allocator(monkeypatch):
     assert calls == ["gc", "sync", "empty"]
 
 
+def test_teacher_capture_runs_in_a_short_lived_process(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(full_run.subprocess, "run", lambda command, check: calls.append((command, check)))
+    full_run._capture_teacher_outputs_isolated(
+        data_file=tmp_path / "calibration.jsonl",
+        output_dir=tmp_path / "cache",
+        layers=(0, 3, 7),
+        attention_layers=(3,),
+        min_free_gib=66.0,
+        overwrite=True,
+    )
+    command, check = calls[0]
+    assert command[:3] == [full_run.sys.executable, "-m", "make_it_flash.cache_worker"]
+    assert command[command.index("--layers") + 1:command.index("--attention-layers")] == ["0", "3", "7"]
+    assert command[command.index("--attention-layers") + 1:command.index("--min-free-gib")] == ["3"]
+    assert command[-1] == "--overwrite"
+    assert check is True
+
+
 def test_preflight_proves_actual_long_train_validation_split(tmp_path):
     source = make_data(tmp_path)
     result = full_run.preflight_full_run(source)
@@ -68,7 +87,7 @@ def test_full_run_dry_run_checks_schedule_without_loading_teacher(tmp_path, monk
     source = make_data(tmp_path)
     config = SimpleNamespace(num_hidden_layers=32, model_type="qwen3_moe", _name_or_path="fixture/base", _commit_hash=REVISION)
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
-    monkeypatch.setattr(full_run, "cache_teacher_outputs", lambda **kwargs: pytest.fail("dry-run loaded teacher"))
+    monkeypatch.setattr(full_run, "_capture_teacher_outputs_isolated", lambda **kwargs: pytest.fail("dry-run loaded teacher"))
     result = full_run.run_full_conversion(data_file=source, output_dir=tmp_path / "out", dry_run=True)
     assert result["estimated_teacher_loads"] == 8
     assert result["qsa_layers"] == [3, 7, 11, 15, 19, 23, 27, 31]
@@ -102,7 +121,7 @@ def test_full_run_uses_eight_teacher_captures_and_32_fits(tmp_path, monkeypatch)
         save_file({"weight": torch.zeros(2, 2)}, str(folder / f"{kind}_layer_{layer:02d}.safetensors"))
         (folder / (f"fit_layer_{layer:02d}.json" if kind == "gdn" else f"fit_qsa_layer_{layer:02d}.json")).write_text("{}")
 
-    monkeypatch.setattr(full_run, "cache_teacher_outputs", capture)
+    monkeypatch.setattr(full_run, "_capture_teacher_outputs_isolated", capture)
     monkeypatch.setattr(full_run, "fit_one_layer", fit)
     monkeypatch.setattr(full_run, "fit_qsa_layer", fit)
     monkeypatch.setattr(full_run, "_verify_cache", lambda *args: None)
