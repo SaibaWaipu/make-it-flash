@@ -1,8 +1,9 @@
-"""Custom Transformers loader for the integrated LLM-jp Flash-Next checkpoint.
+"""Custom loader for the integrated LLM-jp checkpoint with GDN/QSA attention.
 
-Load with ``trust_remote_code=True``. The checkpoint stores all tensors in the
-ordinary Qwen3-MoE shard/index layout, but its attention modules are custom:
-24 GDN layers and 8 QSA layers.
+The base checkpoint is LLM-jp 4.1 32B-A3B-thinking. Its published tensor/config
+layout is Qwen3-MoE-compatible; the model is not a Qwen-branded checkpoint.
+Load with ``trust_remote_code=True``. Attention is replaced by 24 GDN and 8 QSA
+modules while the remaining LLM-jp weights are retained.
 """
 
 from __future__ import annotations

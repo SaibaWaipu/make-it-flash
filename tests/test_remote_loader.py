@@ -81,7 +81,12 @@ def _tiny_repo(tmp_path):
     return tmp_path
 
 
-def test_remote_auto_config_and_tiny_from_pretrained_round_trip(tmp_path):
+def test_remote_auto_config_and_tiny_from_pretrained_round_trip(tmp_path, monkeypatch):
+    # Reproduce Transformers builds where Qwen3-Next references the optional
+    # fused norm global but does not define/import it.
+    import transformers.models.qwen3_next.modeling_qwen3_next as qwen3_next
+
+    monkeypatch.delattr(qwen3_next, "FusedRMSNormGated", raising=False)
     repo = _tiny_repo(tmp_path)
     config = AutoConfig.from_pretrained(repo, trust_remote_code=True, local_files_only=True)
     assert type(config).__name__ == "FlashNextQwen3MoeConfig"

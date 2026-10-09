@@ -57,6 +57,27 @@ def test_make_gdn_avoids_cuda_only_fused_norm_constructor(monkeypatch):
     assert qwen3_next.FusedRMSNormGated is forbidden_fused_norm
 
 
+def test_make_gdn_supports_transformers_without_fused_norm_symbol(monkeypatch):
+    import transformers.models.qwen3_next.modeling_qwen3_next as qwen3_next
+
+    monkeypatch.delattr(qwen3_next, "FusedRMSNormGated")
+    config = SimpleNamespace(
+        model_type="qwen3_moe",
+        hidden_size=64,
+        vocab_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        head_dim=16,
+        intermediate_size=128,
+        rms_norm_eps=1e-6,
+    )
+
+    gdn = make_gdn(config, 0, key_heads=4, value_heads=8)
+
+    assert isinstance(gdn.norm, _SigmoidRMSNormGated)
+    assert not hasattr(qwen3_next, "FusedRMSNormGated")
+
+
 def test_flash_next_schedule_matches_reference_3_to_1_ratio():
     gdn_layers, qsa_layers = flash_next_attention_schedule(32)
     assert len(gdn_layers) == 24

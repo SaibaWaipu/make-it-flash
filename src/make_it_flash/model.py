@@ -1,4 +1,4 @@
-"""Gated DeltaNet construction helpers for Qwen3-MoE pilot conversion."""
+"""Attention conversion helpers for LLM-jp's Qwen3-MoE-compatible checkpoint."""
 
 from __future__ import annotations
 
@@ -93,12 +93,20 @@ def make_gdn(base_config: Any, layer_idx: int, *, key_heads: int | None = None, 
 
     config = make_gdn_config(base_config, key_heads=key_heads, value_heads=value_heads)
     with _QWEN3_NEXT_GDN_INIT_LOCK:
-        fused_norm = modeling_qwen3_next.FusedRMSNormGated
+        # The constructor in some Transformers releases references the module
+        # global even when the optional fused kernel was not imported at all.
+        # Install the torch fallback for construction, then restore the module's
+        # exact original global state so this does not mutate Transformers.
+        has_fused_norm = hasattr(modeling_qwen3_next, "FusedRMSNormGated")
+        fused_norm = getattr(modeling_qwen3_next, "FusedRMSNormGated", None)
         modeling_qwen3_next.FusedRMSNormGated = None
         try:
             gdn = modeling_qwen3_next.Qwen3NextGatedDeltaNet(config, layer_idx)
         finally:
-            modeling_qwen3_next.FusedRMSNormGated = fused_norm
+            if has_fused_norm:
+                modeling_qwen3_next.FusedRMSNormGated = fused_norm
+            else:
+                del modeling_qwen3_next.FusedRMSNormGated
     # Qwen3.8-Flash-Next separates the GDN output gate from the SiLU conv activation.
     gdn.norm = _SigmoidRMSNormGated(gdn.head_v_dim, eps=gdn.layer_norm_epsilon)
     return gdn
