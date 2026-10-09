@@ -74,6 +74,7 @@ def test_full_run_uses_eight_teacher_captures_and_32_fits(tmp_path, monkeypatch)
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     captures = []
     fits = []
+    published = []
     assembled = []
 
     def capture(**kwargs):
@@ -102,10 +103,18 @@ def test_full_run_uses_eight_teacher_captures_and_32_fits(tmp_path, monkeypatch)
         return {"assembled": True, "calibration_data": {}}
 
     monkeypatch.setattr(full_run, "assemble_flash_next_overlay", assemble)
-    result = full_run.run_full_conversion(data_file=source, output_dir=tmp_path / "out", allow_cpu=True)
+
+    def after_layer(kind, layer, fit_dir, expected):
+        published.append((kind, layer, fit_dir, expected["data_sha256"]))
+        assert (fit_dir / f"{kind}_layer_{layer:02d}.safetensors").is_file()
+
+    result = full_run.run_full_conversion(data_file=source, output_dir=tmp_path / "out", allow_cpu=True,
+                                          on_layer_complete=after_layer)
     assert len(captures) == 8
     assert len(fits) == 32
+    assert [call["layer"] for call in fits] == list(range(32))
     assert set(captures[0]["layers"]) == set(range(32)) - {7, 11, 15, 19, 23, 27, 31}
     assert all(len(call["layers"]) == 1 for call in captures[1:])
+    assert [layer for _, layer, _, _ in published] == list(range(32))
     assert len(assembled) == 1 and result["overlay_manifest"]["assembled"] is True
     assert len(result["overlay_manifest"]["calibration_data"]["token_sha256"]) == 20

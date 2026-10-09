@@ -10,7 +10,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .cache import QSA_COMPRESS_RATIO, QSA_TOKEN_BUDGET, cache_teacher_outputs
 from .fit import fit_one_layer
@@ -153,10 +153,15 @@ def run_full_conversion(
     *, data_file: str | Path, output_dir: str | Path, validation_fraction: float = 0.1,
     epochs: int = 3, max_steps: int = 200, min_free_gib: float = 66.0,
     resume: bool = False, allow_cpu: bool = False, dry_run: bool = False,
+    assemble: bool = True,
+    on_layer_complete: Callable[[str, int, Path, dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
-    """Capture, fit, and assemble every scheduled layer, without uploading it."""
-    if not isinstance(resume, bool) or not isinstance(dry_run, bool) or not isinstance(allow_cpu, bool):
-        raise ValueError("resume, dry_run, and allow_cpu must be boolean")
+    """Capture/fit every layer; optionally publish each verified fit immediately."""
+    if (not isinstance(resume, bool) or not isinstance(dry_run, bool) or not isinstance(allow_cpu, bool)
+            or not isinstance(assemble, bool)):
+        raise ValueError("resume, dry_run, allow_cpu, and assemble must be boolean")
+    if on_layer_complete is not None and not callable(on_layer_complete):
+        raise ValueError("on_layer_complete must be callable")
     if epochs < 1 or max_steps < 1 or not math.isfinite(min_free_gib) or min_free_gib < 0:
         raise ValueError("epochs/max_steps must be positive and min_free_gib must be nonnegative")
     expected = preflight_full_run(data_file, validation_fraction=validation_fraction)
@@ -176,7 +181,8 @@ def run_full_conversion(
     plan_data = {key: value for key, value in expected.items() if key != "token_sha256"}
     plan = {"model_id": expected["model_id"], "model_revision": expected["model_revision"],
             "qsa_layers": list(qsa), "gdn_layers": list(gdn), "data": plan_data,
-            "output_dir": str(root), "estimated_teacher_loads": len(qsa), "dry_run": dry_run}
+            "output_dir": str(root), "estimated_teacher_loads": len(qsa), "dry_run": dry_run,
+            "assemble": assemble, "progressive_publish": on_layer_complete is not None}
     if dry_run:
         return plan
     if not allow_cpu:
@@ -191,38 +197,47 @@ def run_full_conversion(
         raise FileExistsError("incomplete overlay directory exists; inspect it before resuming")
     root.mkdir(parents=True, exist_ok=True)
     gdn_dir, qsa_dir = root / "gdn", root / "qsa"
-    # Cache all 24 GDN layers alongside the first QSA capture in one teacher
-    # forward. Subsequent QSA captures reload the teacher once per layer.
-    execution = (("qsa", (qsa[0],), qsa_dir), ("gdn", gdn, gdn_dir), ("qsa", qsa[1:], qsa_dir))
-    for kind, layers, fit_dir in execution:
-        for layer in layers:
-            checkpoint = fit_dir / f"{kind}_layer_{layer:02d}.safetensors"
-            metrics = fit_dir / (f"fit_layer_{layer:02d}.json" if kind == "gdn" else f"fit_qsa_layer_{layer:02d}.json")
-            if resume and checkpoint.is_file() and metrics.is_file():
-                _verify_fit(fit_dir, kind, layer, expected)
-                continue
-            cache_dir = root / "cache" / f"qsa_layer_{qsa[0]:02d}" if kind == "gdn" else root / "cache" / f"qsa_layer_{layer:02d}"
-            cache_manifest = cache_dir / "cache_manifest.json"
-            if cache_manifest.is_file():
-                _verify_cache(cache_dir, expected, kind, layer)
-            else:
-                if kind == "gdn":
-                    raise FileNotFoundError("the shared GDN cache is missing; first QSA capture must complete")
-                capture_layers = (*gdn, layer) if layer == qsa[0] else (layer,)
-                cache_teacher_outputs(data_file=data_file, output_dir=cache_dir, layers=capture_layers,
-                                      attention_layers=(layer,), min_free_gib=min_free_gib,
-                                      overwrite=cache_dir.exists())
-                _verify_cache(cache_dir, expected, kind, layer)
-            kwargs = dict(cache_dir=cache_dir, output_dir=fit_dir, layer=layer,
-                          epochs=epochs, max_steps=max_steps, validation_fraction=validation_fraction,
-                          overwrite=checkpoint.exists() or metrics.exists(), allow_cpu=allow_cpu)
-            if kind == "gdn":
-                fit_one_layer(**kwargs)
-            else:
-                fit_qsa_layer(**kwargs)
+    # Fit in numeric layer order so each completed layer can be committed
+    # immediately. The first GDN capture also stores QSA layer 3, preserving
+    # the eight-teacher-load optimization (one shared capture plus seven QSA).
+    for layer in range(num_layers):
+        kind = "qsa" if layer in qsa else "gdn"
+        fit_dir = qsa_dir if kind == "qsa" else gdn_dir
+        checkpoint = fit_dir / f"{kind}_layer_{layer:02d}.safetensors"
+        metrics = fit_dir / (f"fit_layer_{layer:02d}.json" if kind == "gdn" else f"fit_qsa_layer_{layer:02d}.json")
+        if resume and checkpoint.is_file() and metrics.is_file():
             _verify_fit(fit_dir, kind, layer, expected)
+            continue
+        cache_layer = qsa[0] if kind == "gdn" else layer
+        cache_dir = root / "cache" / f"qsa_layer_{cache_layer:02d}"
+        cache_manifest = cache_dir / "cache_manifest.json"
+        if cache_manifest.is_file():
+            _verify_cache(cache_dir, expected, kind, layer)
+        else:
+            capture_layers = (*gdn, qsa[0]) if kind == "gdn" or layer == qsa[0] else (layer,)
+            capture_attention = (qsa[0],) if kind == "gdn" else (layer,)
+            cache_teacher_outputs(data_file=data_file, output_dir=cache_dir, layers=capture_layers,
+                                  attention_layers=capture_attention, min_free_gib=min_free_gib,
+                                  overwrite=cache_dir.exists())
+            _verify_cache(cache_dir, expected, kind, layer)
+        kwargs = dict(cache_dir=cache_dir, output_dir=fit_dir, layer=layer,
+                      epochs=epochs, max_steps=max_steps, validation_fraction=validation_fraction,
+                      overwrite=checkpoint.exists() or metrics.exists(), allow_cpu=allow_cpu)
+        if kind == "gdn":
+            fit_one_layer(**kwargs)
+        else:
+            fit_qsa_layer(**kwargs)
+        _verify_fit(fit_dir, kind, layer, expected)
+        if on_layer_complete is not None:
+            if (sha256_file(data_file) != expected["data_sha256"]
+                    or sha256_file(Path(data_file).with_name("data_manifest.json")) != expected["manifest_sha256"]):
+                raise RuntimeError("calibration data changed during the full run; refuse the next layer upload")
+            on_layer_complete(kind, layer, fit_dir, expected)
     if sha256_file(data_file) != expected["data_sha256"] or sha256_file(Path(data_file).with_name("data_manifest.json")) != expected["manifest_sha256"]:
         raise RuntimeError("calibration data changed during the full run")
+    if not assemble:
+        plan.update({"dry_run": False, "completed_layers": num_layers, "assembled": False})
+        return plan
     assembled = root / "overlay"
     result = assemble_flash_next_overlay(base_config=base_config, base_model_id=expected["model_id"],
                                          base_model_revision=expected["model_revision"], gdn_fit_dir=gdn_dir,
